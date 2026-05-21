@@ -24,6 +24,9 @@ profiles:
     deny:
       - { action: exec, target: ["git push --force", "git push -f", "git reset --hard", "git rebase", "rm -rf"] }
       - { action: secret.read, target: ["**/.env*", "**/secrets/**", "**/*.pem", "**/id_rsa*"] }
+      # Secrets are not reachable via the ordinary fs.read grant either — the
+      # broad `fs.read: **` allow above must not become a secret-exfil path.
+      - { action: fs.read, target: ["**/.env*", "**/secrets/**", "**/*.pem", "**/id_rsa*"] }
 
   trusted:
     description: Higher autonomy inside an isolated worktree. Destructive class still denied.

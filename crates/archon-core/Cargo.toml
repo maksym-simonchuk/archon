@@ -12,11 +12,15 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
 
-# Real deps land with their milestone (kept out until used — see AGENTS.md):
-#   blake3                            -> hash_files        (M1)
-#   tree-sitter, tree-sitter-<lang>   -> parse_symbols     (M1)
-#   serde, serde_json                 -> boundary payloads (M1)
+# parse_symbols (M1) uses a pure-Rust heuristic extractor, NOT tree-sitter:
+# tree-sitter's C grammars do not link cleanly for wasm32-unknown-unknown via
+# wasm-pack. Swapping in tree-sitter (or web-tree-sitter in the host) is a
+# future upgrade tracked against ADR-0011.
 
 [profile.release]
 opt-level = 3      # compute core: optimize for speed (size is secondary)

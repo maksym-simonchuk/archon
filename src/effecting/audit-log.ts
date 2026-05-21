@@ -1,9 +1,24 @@
 import type { JournalEntry } from '../core/types';
-import { notImplemented } from '../core/result';
 
-/** Append-only record of every decision, diff, and cost. Never mutated. */
+/**
+ * Append-only, in-memory record of every decision / diff / cost (ADR-0010).
+ * Entries are never mutated and carry a monotonically increasing `seq`. Durable
+ * on-disk persistence is layered on later and must route through the broker, so
+ * the "only the broker touches the filesystem" invariant stays intact.
+ */
 export class AuditLog {
-  append(_entry: JournalEntry): void {
-    return notImplemented('AuditLog.append', 'M3');
+  private readonly log: JournalEntry[] = [];
+  private nextSeq = 0;
+
+  /** Append an entry; `seq` is assigned here. Returns the stored entry. */
+  append(entry: Omit<JournalEntry, 'seq'>): JournalEntry {
+    const stored: JournalEntry = { ...entry, seq: this.nextSeq++ };
+    this.log.push(stored);
+    return stored;
+  }
+
+  /** Read-only view of every entry, in append order. */
+  entries(): readonly JournalEntry[] {
+    return this.log;
   }
 }

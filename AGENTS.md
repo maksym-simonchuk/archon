@@ -64,3 +64,12 @@ and change as little as possible.**
 - [ ] `npm run typecheck` passes; relevant tests pass
 - [ ] No new dependencies / abstractions without justification
 - [ ] Risky changes were staged in a worktree and verified before commit
+
+
+<claude-mem-context>
+# Memory Context
+
+# [archon] recent context, 2026-05-21 10:38pm GMT+3
+
+No previous sessions found.
+</claude-mem-context>
