@@ -35,6 +35,54 @@ export interface PolicyVerdict {
   message: string;
 }
 
+// ── Sensing / symbol graph ──────────────────────────────────────────────────
+/** Symbol-graph edge relationship; direction is src → dst. */
+export type EdgeKind = 'defines' | 'imports' | 'calls' | 'tests';
+
+/** A symbol defined within a file (a node in the graph). */
+export interface ParsedSymbol {
+  /**
+   * Repo-unique, fully-qualified symbol id (e.g. `src/auth/login.ts#handleLogin`),
+   * NOT a bare local name — two files may both define `foo`. `parseSymbols` is
+   * responsible for qualifying it using the source path. The symbol graph keys on
+   * this id, so a collision here silently corrupts blast radius.
+   */
+  name: string;
+  /** tree-sitter node kind: 'function' | 'class' | 'const' | … */
+  kind: string;
+}
+
+/** A directed relationship between two symbols, by their qualified ids (src → dst). */
+export interface ParsedEdge {
+  src: string;
+  dst: string;
+  kind: EdgeKind;
+}
+
+/** `parseSymbols` output for one file — the JS↔WASM boundary payload (ADR-0011). */
+export interface ParsedFile {
+  symbols: ParsedSymbol[];
+  edges: ParsedEdge[];
+}
+
+/** `hashFiles` output: a Merkle leaf hash for one file (ADR-0005). */
+export interface FileHash {
+  path: string;
+  hash: string;
+}
+
+/** `rankRepoMap` input: the symbol graph as nodes + directed edges (ADR-0006). */
+export interface RepoMapInput {
+  nodes: string[];
+  edges: { src: string; dst: string }[];
+}
+
+/** `rankRepoMap` output: a symbol id with its PageRank score (higher = more central). */
+export interface RankedSymbol {
+  id: string;
+  score: number;
+}
+
 // ── Cognition ─────────────────────────────────────────────────────────────────
 export interface Task {
   id: string;

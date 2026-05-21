@@ -1,15 +1,95 @@
-import type { Completion, ModelSpec, RouteRequest } from '../core/types';
-import { notImplemented } from '../core/result';
+import type { Completion, ModelSpec, RouteRequest, TaskClass } from '../core/types';
+
+/** A provider's completion backend. HTTP clients (prod) and fakes (tests) share this. */
+export interface ProviderClient {
+  /** Provider id this client serves (matches `ModelSpec.provider`). */
+  readonly provider: string;
+  complete(
+    model: ModelSpec,
+    prompt: string,
+    maxTokens: number,
+  ): Promise<{ text: string; inputTokens: number; outputTokens: number }>;
+}
+
+export interface RouterOptions {
+  /** Preferred model id per task class (overrides strength-based selection). */
+  routing?: Partial<Record<TaskClass, string>>;
+  /** Ordered model ids to try after the preferred/strength picks, on failure. */
+  fallback?: string[];
+  /** Spend ceiling for this router; once reached, `complete` trips the breaker. */
+  budgetUsd?: number;
+}
+
+const dedupe = (xs: string[]): string[] => [...new Set(xs)];
 
 /**
  * Picks a model by task class (cheap for plan/summarize, strong for reason/diff),
- * with an exact/prefix prompt cache, a static fallback chain on error/rate-limit,
- * and a budget circuit-breaker. Starts with two providers. See ADR-0007.
+ * with an exact prompt cache, a fallback chain on error/rate-limit, and a budget
+ * circuit-breaker. Providers are injected (HTTP clients in prod, fakes in tests),
+ * so the routing policy is fully testable without network. See ADR-0007.
  */
 export class ProviderRouter {
-  constructor(_registry: ModelSpec[]) {}
+  private readonly models: Map<string, ModelSpec>;
+  private readonly clients: Map<string, ProviderClient>;
+  private readonly cache = new Map<string, Completion>();
+  private spentUsd = 0;
 
-  async complete(_req: RouteRequest): Promise<Completion> {
-    return notImplemented('ProviderRouter.complete', 'M7');
+  constructor(
+    registry: ModelSpec[],
+    clients: ProviderClient[] = [],
+    private readonly opts: RouterOptions = {},
+  ) {
+    this.models = new Map(registry.map((m) => [m.id, m]));
+    this.clients = new Map(clients.map((c) => [c.provider, c]));
+  }
+
+  /** Total cost charged so far (sum of non-cached completions). */
+  get spent(): number {
+    return this.spentUsd;
+  }
+
+  async complete(req: RouteRequest): Promise<Completion> {
+    const cacheKey = `${req.taskClass}::${req.prompt}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return { ...cached, cached: true };
+
+    if (this.opts.budgetUsd !== undefined && this.spentUsd >= this.opts.budgetUsd) {
+      throw new Error(
+        `[archon] provider budget exhausted ($${this.spentUsd.toFixed(2)} ≥ $${this.opts.budgetUsd.toFixed(2)})`,
+      );
+    }
+
+    const chain = this.routeChain(req.taskClass);
+    if (chain.length === 0) throw new Error(`[archon] no model routes to task class "${req.taskClass}"`);
+
+    let lastError: unknown;
+    for (const modelId of chain) {
+      const model = this.models.get(modelId);
+      const client = model && this.clients.get(model.provider);
+      if (!model || !client) continue;
+      try {
+        const { text, inputTokens, outputTokens } = await client.complete(model, req.prompt, req.maxTokens);
+        const costUsd =
+          (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
+        this.spentUsd += costUsd;
+        const completion: Completion = { modelId, text, inputTokens, outputTokens, costUsd, cached: false };
+        this.cache.set(cacheKey, completion);
+        return completion;
+      } catch (e) {
+        lastError = e; // provider failed — fall through to the next in the chain
+      }
+    }
+    throw new Error(
+      `[archon] all providers failed for "${req.taskClass}": ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    );
+  }
+
+  /** Preferred model, then strength-matched models, then the static fallback chain. */
+  private routeChain(taskClass: TaskClass): string[] {
+    const preferred = this.opts.routing?.[taskClass];
+    const byStrength = [...this.models.values()]
+      .filter((m) => m.strengths.includes(taskClass))
+      .map((m) => m.id);
+    return dedupe([...(preferred ? [preferred] : []), ...byStrength, ...(this.opts.fallback ?? [])]);
   }
 }

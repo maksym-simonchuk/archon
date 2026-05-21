@@ -1,17 +1,96 @@
-import type { Task } from '../core/types';
 import type { ComputeCore } from '../core/compute';
-import { notImplemented } from '../core/result';
+import type { RankedSymbol, RepoMapInput, Task } from '../core/types';
+import type { IndexStore } from './store';
+
+/** Result of assembling a working set. `tokens` is guaranteed ≤ the budget. */
+export interface AssembledContext {
+  /** The rendered repo-map (highest-rank symbols first, with provenance). */
+  text: string;
+  /** Estimated token count (≈ chars / 4); never exceeds the requested budget. */
+  tokens: number;
+  /** Symbol ids included, in rank order — the working set's provenance. */
+  included: string[];
+  /** True when served from the in-memory cache (repo state + budget unchanged). */
+  cached: boolean;
+}
+
+/** Rough token estimate; deliberately conservative (over-counts, never under). */
+const estimateTokens = (s: string): number => Math.ceil(s.length / 4);
 
 /**
  * Assembles a token-budgeted working set: a repo-map (PageRank-ranked symbol
- * skeleton) + graph/lexical retrieval, with hash-keyed summaries. Compression,
- * not ingestion; drops lowest-rank context first under budget. Ranking runs in
- * the Rust/WASM compute core (ADR-0011). See ADR-0006.
+ * skeleton) rendered highest-rank-first, dropping the lowest-rank symbols once
+ * the budget is hit — compression, not ingestion (ADR-0006). Ranking runs in the
+ * Rust/WASM compute core (ADR-0011).
+ *
+ * Caching is in-memory and keyed by the repo-state fingerprint + budget, so an
+ * identical repo state never recomputes the ranking. A persistent, hash-keyed
+ * disk cache under `.archon/cache` lands once the Capability Broker (M3) exists
+ * — the context service must not touch `fs` directly (AGENTS.md).
  */
 export class ContextService {
-  constructor(_core: ComputeCore) {}
+  private readonly cache = new Map<string, Omit<AssembledContext, 'cached'>>();
 
-  async assemble(_task: Task, _budgetTokens: number): Promise<string> {
-    return notImplemented('ContextService.assemble', 'M2');
+  constructor(
+    private readonly core: ComputeCore,
+    private readonly store: IndexStore,
+  ) {}
+
+  async assemble(task: Task, budgetTokens: number): Promise<AssembledContext> {
+    const key = this.cacheKey(task, budgetTokens);
+    const hit = this.cache.get(key);
+    if (hit) return { ...hit, cached: true };
+
+    const symbols = this.store.allSymbols();
+    const graph: RepoMapInput = {
+      nodes: symbols.map((s) => s.name),
+      edges: this.store.loadEdges().map((e) => ({ src: e.src, dst: e.dst })),
+    };
+    const ranked = await this.core.rankRepoMap(graph);
+    const meta = new Map(symbols.map((s) => [s.name, { file: s.file, kind: s.kind }]));
+
+    const built = this.renderWithinBudget(task, ranked, meta, budgetTokens);
+    this.cache.set(key, built);
+    return { ...built, cached: false };
+  }
+
+  /**
+   * Goal + budget + repo-state fingerprint. The goal is part of the key because
+   * it is rendered into the assembled text (the header), so two tasks with the
+   * same repo state but different goals must not collide on a cached result.
+   */
+  private cacheKey(task: Task, budgetTokens: number): string {
+    const fingerprint = this.store
+      .allFileHashes()
+      .map((f) => `${f.path}:${f.hash}`)
+      .join('\n');
+    return `${task.goal}::${budgetTokens}::${fingerprint}`;
+  }
+
+  private renderWithinBudget(
+    task: Task,
+    ranked: RankedSymbol[],
+    meta: Map<string, { file: string; kind: string }>,
+    budgetTokens: number,
+  ): Omit<AssembledContext, 'cached'> {
+    const header = `# Repo map for: ${task.goal}\n`;
+    let tokens = estimateTokens(header);
+    if (tokens > budgetTokens) return { text: '', tokens: 0, included: [] };
+
+    const lines: string[] = [];
+    const included: string[] = [];
+    for (const { id, score } of ranked) {
+      const m = meta.get(id);
+      if (!m) continue;
+      const line = `- ${id} [${m.kind}] (${m.file}) score=${score.toFixed(4)}\n`;
+      const cost = estimateTokens(line);
+      if (tokens + cost > budgetTokens) break;
+      lines.push(line);
+      included.push(id);
+      tokens += cost;
+    }
+
+    const text = header + lines.join('');
+    return { text, tokens: estimateTokens(text), included };
   }
 }
