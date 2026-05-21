@@ -1,3 +1,5 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   cmdIndex,
@@ -13,6 +15,22 @@ import {
 import { buildRuntime, type Runtime } from './runtime';
 
 const PROMPT = 'archon› ';
+const HISTORY_FILE = 'shell_history';
+const HISTORY_MAX = 1000;
+
+/** Every slash command the shell understands — drives tab-completion. */
+const COMMANDS = [
+  '/plan',
+  '/run',
+  '/index',
+  '/status',
+  '/memory',
+  '/promote',
+  '/plugins',
+  '/help',
+  '/exit',
+  '/quit',
+] as const;
 
 const SHELL_HELP = `commands:
   /plan <goal>     plan a task — no writes
@@ -27,6 +45,34 @@ const SHELL_HELP = `commands:
   <text>           shorthand for /plan <text>`;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * readline completer: when the line is the start of a slash command, offer the
+ * matching commands; for anything else (e.g. typing a goal) offer nothing so
+ * the input isn't disturbed. Returns the `[completions, line]` tuple readline
+ * expects. Exported so the completion logic is testable without a TTY.
+ */
+export function completeShell(line: string): [string[], string] {
+  return [COMMANDS.filter((c) => c.startsWith(line)), line];
+}
+
+/** Load up to HISTORY_MAX prior input lines (most-recent-first) to seed readline. */
+export function loadHistory(file: string): string[] {
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(0, HISTORY_MAX);
+  } catch {
+    return []; // no history yet (or unreadable) — start clean
+  }
+}
+
+/** Persist readline's history array (most-recent-first). Best-effort: never throws. */
+export function saveHistory(file: string, history: string[]): void {
+  try {
+    writeFileSync(file, history.slice(0, HISTORY_MAX).join('\n'));
+  } catch {
+    // History is a convenience; a write failure must never break the shell.
+  }
+}
 
 /**
  * Route one line of shell input to a command. A bare line (no leading slash) is
@@ -91,7 +137,22 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
  */
 export async function startShell(): Promise<void> {
   const rt = await buildRuntime(process.cwd());
-  const rl = createInterface({ input: process.stdin, output: process.stdout, prompt: PROMPT });
+  const historyFile = join(rt.root, '.archon', HISTORY_FILE);
+  let history = loadHistory(historyFile);
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: PROMPT,
+    completer: completeShell,
+    history,
+    historySize: HISTORY_MAX,
+    removeHistoryDuplicates: true,
+  });
+  // readline emits the full (most-recent-first) array on every change; keep the
+  // latest so we can persist it once on exit rather than on every keystroke.
+  rl.on('history', (h: string[]) => {
+    history = h;
+  });
 
   console.log('archon interactive shell — /help for commands, /exit to quit');
   console.log(plannerLabel(rt.llmPlanning));
@@ -112,5 +173,6 @@ export async function startShell(): Promise<void> {
   } finally {
     rl.close();
     rt.close();
+    saveHistory(historyFile, history);
   }
 }

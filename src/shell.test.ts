@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildRuntime, type Runtime } from './runtime';
-import { dispatch } from './shell';
+import { completeShell, dispatch, loadHistory, saveHistory } from './shell';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
 
@@ -81,5 +81,28 @@ describe('shell dispatch', () => {
     } finally {
       rt.close();
     }
+  });
+});
+
+describe('shell tab-completion', () => {
+  it('completes a slash-command prefix to its matches', () => {
+    expect(completeShell('/pl')).toEqual([['/plan', '/plugins'], '/pl']);
+    expect(completeShell('/s')).toEqual([['/status'], '/s']);
+  });
+
+  it('offers every command for a lone slash, and nothing for a bare goal', () => {
+    expect(completeShell('/')[0]).toContain('/plan');
+    expect(completeShell('/')[0]).toContain('/plugins');
+    expect(completeShell('add a greeter')).toEqual([[], 'add a greeter']);
+  });
+});
+
+describe('shell history persistence', () => {
+  it('round-trips history (most-recent-first); a missing file reads empty', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-hist-'));
+    const file = join(dir, 'shell_history');
+    expect(loadHistory(file)).toEqual([]); // nothing persisted yet
+    saveHistory(file, ['/status', 'add a greeter']); // index 0 = most recent
+    expect(loadHistory(file)).toEqual(['/status', 'add a greeter']);
   });
 });
