@@ -6,7 +6,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
-import type { Profile, StepResult, Task } from './core/types';
+import type { JournalEntry, Profile, StepResult, Task } from './core/types';
 import { buildRuntime } from './runtime';
 import { TaskJournal } from './services/task-journal';
 
@@ -50,6 +50,23 @@ function printResults(results: StepResult[]): void {
   }
   const merged = results.every((r) => r.verdict.passed);
   console.log(merged ? 'run: merged (verified)' : 'run: discarded (verify failed; main tree untouched)');
+}
+
+/** A short payload summary for the cost / verdict / decision journal kinds. */
+function journalHint(e: JournalEntry): string {
+  const p = e.payload;
+  if (typeof p !== 'object' || p === null) return '';
+  const r = p as Record<string, unknown>;
+  switch (e.kind) {
+    case 'cost':
+      return typeof r.usd === 'number' ? `  $${r.usd.toFixed(4)}` : '';
+    case 'verdict':
+      return typeof r.passed === 'boolean' ? `  passed=${r.passed}` : '';
+    case 'decision':
+      return typeof r.outcome === 'string' ? `  ${r.outcome}` : '';
+    default:
+      return '';
+  }
 }
 
 async function runPlan(goal: string): Promise<void> {
@@ -109,7 +126,7 @@ async function runStatus(): Promise<void> {
       return;
     }
     console.log(`journal: ${recent.length} most-recent entries (newest first):`);
-    for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}`);
+    for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}${journalHint(e)}`);
   } finally {
     journal.close();
     runtime.close();

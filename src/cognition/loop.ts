@@ -11,12 +11,14 @@ export interface CognitionLoopDeps {
   planner: Planner;
   transaction: Transaction;
   reflector: Reflector;
-  /** Durable, append-only record of the run (plan / step / verdict). */
+  /** Durable, append-only record of the run (plan / step / diff / verdict / decision / cost). */
   journal: TaskJournal;
   /** Build an Executor whose broker is rooted at the (now-known) worktree. */
   executorFor: (worktree: string, taskId: string) => Executor;
   /** Build a Verifier whose broker is rooted at the worktree. */
   verifierFor: (worktree: string) => Verifier;
+  /** Provider spend (USD) to record as the run's `cost` entry; omitted ⇒ no cost entry. */
+  cost?: () => number;
 }
 
 const DISCARDED: Verdict = { passed: false, checks: [] };
@@ -32,7 +34,7 @@ export class CognitionLoop {
   constructor(private readonly deps: CognitionLoopDeps) {}
 
   async run(task: Task, context = ''): Promise<StepResult[]> {
-    const { planner, transaction, reflector, journal, executorFor, verifierFor } = this.deps;
+    const { planner, transaction, reflector, journal, executorFor, verifierFor, cost } = this.deps;
     const note = (kind: JournalKind, payload: unknown): void => {
       journal.append({ taskId: task.id, ts: new Date().toISOString(), kind, payload });
     };
@@ -54,7 +56,15 @@ export class CognitionLoop {
       }
       const result = await executor.run(step, action);
       results.push(result);
-      note('step', { stepId: result.stepId, passed: result.verdict.passed, files: result.diff?.files ?? [] });
+      note('step', { stepId: result.stepId, passed: result.verdict.passed });
+      if (result.diff) {
+        note('diff', {
+          stepId: result.stepId,
+          files: result.diff.files,
+          added: result.diff.added,
+          removed: result.diff.removed,
+        });
+      }
       if (!result.verdict.passed) break;
 
       const committed = await transaction.commitStep(step.intent);
@@ -71,7 +81,12 @@ export class CognitionLoop {
     if (stepsClean) results.push({ stepId: `${task.id}-verify`, verdict });
     note('verdict', { passed: verdict.passed, checks: verdict.checks });
 
-    await transaction.finalize(verdict);
+    const finalized = await transaction.finalize(verdict);
+    note('decision', {
+      merged: finalized.ok && finalized.value === 'merged',
+      outcome: finalized.ok ? finalized.value : finalized.error.message,
+    });
+    if (cost) note('cost', { usd: cost() });
     await reflector.reflect(task, results);
     return results;
   }

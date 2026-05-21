@@ -50,6 +50,7 @@ function loopFor(
   strategy: PlanStrategy,
   memory: MemoryStore,
   journal: TaskJournal,
+  cost?: () => number,
 ): CognitionLoop {
   const audit = new AuditLog();
   // `trusted` so worktree/merge git ops are permitted; the broker still gates each.
@@ -62,6 +63,7 @@ function loopFor(
     journal,
     executorFor: (worktree, taskId) => new Executor(brokerAt(worktree), taskId),
     verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
+    cost,
   });
 }
 
@@ -96,13 +98,19 @@ describe('CognitionLoop (M6)', () => {
     const memory = new MemoryStore(':memory:');
     const journal = new TaskJournal(':memory:');
     const t = task('add function greet');
-    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal).run(t);
+    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal, () => 0.0042).run(t);
 
     expect(results.every((r) => r.verdict.passed)).toBe(true);
     expect(results[results.length - 1]?.stepId).toContain('verify');
     expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(true);
     expect(memory.recall('episodic', 'add function greet')).toHaveLength(1);
-    expect((await journal.replay(t.id)).map((e) => e.kind)).toEqual(['plan', 'step', 'step', 'verdict']);
+
+    const entries = await journal.replay(t.id);
+    expect(entries.map((e) => e.kind)).toEqual(
+      ['plan', 'step', 'diff', 'step', 'diff', 'verdict', 'decision', 'cost'],
+    );
+    expect((entries.find((e) => e.kind === 'decision')?.payload as { merged: boolean }).merged).toBe(true);
+    expect((entries.find((e) => e.kind === 'cost')?.payload as { usd: number }).usd).toBe(0.0042);
     memory.close();
     journal.close();
   });

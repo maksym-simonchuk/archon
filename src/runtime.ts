@@ -139,6 +139,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       journal: journal(),
       executorFor: (worktree, taskId) => new Executor(brokerAt(worktree, 'trusted'), taskId),
       verifierFor: (worktree) => new Verifier(brokerAt(worktree, 'trusted')),
+      cost: () => router.spent,
     });
 
   const retriever = async (tier: MemoryTier, key: string): Promise<RetrieverPlugin> => {
