@@ -1,18 +1,17 @@
 #!/usr/bin/env node
-// Archon CLI — command surface for the MVP. All four commands are live:
-// `index` (M1), `plan`/`run` (M6), `status` (M0). Every command is composed
-// through the single runtime root (`buildRuntime`).
+// Archon CLI — command surface for the MVP. With no args it launches the
+// interactive shell; otherwise it runs one command and exits. Every command
+// composes through the single runtime root (buildRuntime); the shared command
+// implementations live in src/commands.ts (reused by the shell).
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import type { CognitivePlan } from './cognition/types';
-import type { JournalEntry, Profile, StepResult, Task } from './core/types';
-import { buildRuntime } from './runtime';
-import { TaskJournal } from './services/task-journal';
+import { cmdIndex, cmdPlan, cmdRun, cmdStatus } from './commands';
+import { buildRuntime, type Runtime } from './runtime';
+import { startShell } from './shell';
 
 const HELP = `archon — constrained AI staff-engineer runtime (MVP)
 
 Usage:
+  archon                  Launch the interactive shell
   archon index            Incrementally index changed files            (M1)
   archon plan <goal>      Produce a plan tree — no writes               (M6)
   archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
@@ -21,115 +20,13 @@ Usage:
 
 See docs/ROADMAP.md and AGENTS.md.`;
 
-const makeTask = (goal: string, profile: Profile): Task => ({
-  id: `t-${Date.now().toString(36)}`,
-  goal,
-  profile,
-  createdAt: new Date().toISOString(),
-});
-
-const plannerLabel = (llm: boolean): string =>
-  `planner: ${llm ? 'llm (provider-router)' : 'deterministic (scaffold)'}`;
-
-function printPlan(cog: CognitivePlan): void {
-  console.log(`plan ${cog.plan.taskId}: ${cog.plan.rationale}`);
-  for (const step of cog.plan.steps) {
-    console.log(`  • ${step.intent}  [${step.capability.action} ${step.capability.target}] (reversible)`);
-  }
-  for (const check of cog.checks) console.log(`  ✓ verify ${check.name}: ${check.argv.join(' ')}`);
-}
-
-function printResults(results: StepResult[]): void {
-  for (const r of results) {
-    const mark = r.verdict.passed ? '✓' : '✗';
-    const where = r.diff ? ` (${r.diff.files.join(', ')})` : '';
-    console.log(`  ${mark} ${r.stepId}${where}`);
-    for (const c of r.verdict.checks) {
-      if (!c.passed && c.output) console.log(`      ${c.name}: ${c.output}`);
-    }
-  }
-  const merged = results.every((r) => r.verdict.passed);
-  console.log(merged ? 'run: merged (verified)' : 'run: discarded (verify failed; main tree untouched)');
-}
-
-/** A short payload summary for the cost / verdict / decision journal kinds. */
-function journalHint(e: JournalEntry): string {
-  const p = e.payload;
-  if (typeof p !== 'object' || p === null) return '';
-  const r = p as Record<string, unknown>;
-  switch (e.kind) {
-    case 'cost':
-      return typeof r.usd === 'number' ? `  $${r.usd.toFixed(4)}` : '';
-    case 'verdict':
-      return typeof r.passed === 'boolean' ? `  passed=${r.passed}` : '';
-    case 'decision':
-      return typeof r.outcome === 'string' ? `  ${r.outcome}` : '';
-    default:
-      return '';
-  }
-}
-
-async function runPlan(goal: string): Promise<void> {
-  if (!goal) return usageError('plan <goal>');
-  const runtime = await buildRuntime(process.cwd());
+/** Build a runtime, run one command against it, and always close it. */
+async function withRuntime(fn: (rt: Runtime) => Promise<void>): Promise<void> {
+  const rt = await buildRuntime(process.cwd());
   try {
-    console.log(plannerLabel(runtime.llmPlanning));
-    const task = makeTask(goal, runtime.config.profile);
-    printPlan(await runtime.planner().plan(task, await runtime.context(task)));
+    await fn(rt);
   } finally {
-    runtime.close();
-  }
-}
-
-async function runRun(goal: string): Promise<void> {
-  if (!goal) return usageError('run <goal>');
-  const runtime = await buildRuntime(process.cwd());
-  try {
-    console.log(plannerLabel(runtime.llmPlanning));
-    const task = makeTask(goal, 'trusted');
-    printResults(await runtime.loop().run(task, await runtime.context(task)));
-  } finally {
-    runtime.close();
-  }
-}
-
-async function runIndex(): Promise<void> {
-  const runtime = await buildRuntime(process.cwd());
-  const { indexer, store, close } = await runtime.indexer();
-  try {
-    const dirty = await indexer.dirtyPaths();
-    await indexer.reindex(dirty);
-    console.log(
-      `indexed ${dirty.length} changed path(s) → ${store.allSymbols().length} symbols across ${store.allFileHashes().length} file(s)`,
-    );
-  } finally {
-    close();
-    runtime.close();
-  }
-}
-
-async function runStatus(): Promise<void> {
-  const runtime = await buildRuntime(process.cwd());
-  const b = runtime.config.budgets;
-  console.log(
-    `profile: ${runtime.config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`,
-  );
-
-  // Read-only intent: don't create the db just to report an empty journal, so
-  // open the real path only when it already exists (else an ephemeral one).
-  const journalPath = join(runtime.root, runtime.config.paths.journal);
-  const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
-  try {
-    const recent = journal.recent(15);
-    if (recent.length === 0) {
-      console.log('journal: (empty — run `archon run <goal>`)');
-      return;
-    }
-    console.log(`journal: ${recent.length} most-recent entries (newest first):`);
-    for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}${journalHint(e)}`);
-  } finally {
-    journal.close();
-    runtime.close();
+    rt.close();
   }
 }
 
@@ -143,18 +40,21 @@ async function main(argv: string[]): Promise<void> {
   const goal = rest.join(' ').trim();
   switch (cmd) {
     case undefined:
+      return startShell();
     case '-h':
     case '--help':
       console.log(HELP);
       return;
     case 'index':
-      return runIndex();
+      return withRuntime(cmdIndex);
     case 'plan':
-      return runPlan(goal);
+      if (!goal) return usageError('plan <goal>');
+      return withRuntime((rt) => cmdPlan(rt, goal));
     case 'run':
-      return runRun(goal);
+      if (!goal) return usageError('run <goal>');
+      return withRuntime((rt) => cmdRun(rt, goal));
     case 'status':
-      return runStatus();
+      return withRuntime(cmdStatus);
     default:
       console.error(`unknown command: ${cmd}\n`);
       console.log(HELP);
