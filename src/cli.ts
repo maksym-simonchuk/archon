@@ -14,6 +14,7 @@ import {
   cmdPromotions,
   cmdRun,
   cmdStatus,
+  cmdTool,
 } from './commands';
 import { cmdInit } from './init';
 import { buildRuntime, type Runtime } from './runtime';
@@ -32,6 +33,7 @@ Usage:
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon plugins          List loaded plugins + capability previews     (M7)
+  archon tool <name> [json]    Invoke a tool plugin (policy-gated)       (M7)
   archon --help           Show this help
 
 See docs/ROADMAP.md and AGENTS.md.`;
@@ -77,6 +79,12 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime(cmdDoctor);
     case 'plugins':
       return withRuntime(cmdPlugins);
+    case 'tool': {
+      const [name, ...more] = rest;
+      if (!name) return usageError('tool <name> [json-input]');
+      const input = more.join(' ').trim();
+      return withRuntime((rt) => cmdTool(rt, name, input || undefined));
+    }
     case 'memory': {
       const [sub, ...more] = rest;
       if (sub === 'promote') {

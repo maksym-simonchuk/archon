@@ -11,6 +11,7 @@ import {
   cmdPromotions,
   cmdRun,
   cmdStatus,
+  cmdTool,
   plannerLabel,
 } from './commands';
 import { buildRuntime, type Runtime } from './runtime';
@@ -29,6 +30,7 @@ const COMMANDS = [
   '/memory',
   '/promote',
   '/plugins',
+  '/tool',
   '/help',
   '/exit',
   '/quit',
@@ -43,6 +45,7 @@ const SHELL_HELP = `commands:
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
+  /tool <name> [json]  invoke a tool plugin (policy-gated)
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
   <text>           shorthand for /plan <text>`;
@@ -124,6 +127,12 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
     case '/plugins':
       await cmdPlugins(rt);
       return true;
+    case '/tool': {
+      const [name, ...more] = rest;
+      if (!name) console.log('usage: /tool <name> [json-input]');
+      else await cmdTool(rt, name, more.join(' ').trim() || undefined);
+      return true;
+    }
     default:
       if (head.startsWith('/')) {
         console.log(`unknown command "${head}" — try /help`);

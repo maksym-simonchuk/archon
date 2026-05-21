@@ -201,3 +201,28 @@ export async function cmdPlugins(rt: Runtime): Promise<void> {
     console.log(`  ${runnable ? '✓' : '⚠'} ${manifest.name}@${manifest.version}  [${manifest.kind}]  ${caps}`);
   }
 }
+
+/**
+ * Invoke a loaded `tool` plugin by name; the optional argument is JSON parsed
+ * into the tool input. The host enforces the plugin's declared capabilities
+ * against the active policy *before* it runs, so a tool wanting a capability the
+ * profile won't grant is refused (e.g. `policy.ask` on `net` under `safe`), not
+ * executed — the load → list → invoke loop with the broker in the middle.
+ */
+export async function cmdTool(rt: Runtime, name: string, inputJson?: string): Promise<void> {
+  let input: unknown;
+  if (inputJson) {
+    try {
+      input = JSON.parse(inputJson);
+    } catch {
+      console.log(`tool ${name}: input is not valid JSON: ${inputJson}`);
+      return;
+    }
+  }
+  const result = await (await rt.pluginHost()).invokeTool(name, input);
+  console.log(
+    result.ok
+      ? `tool ${name}: ${JSON.stringify(result.value)}`
+      : `tool ${name}: refused (${result.error.code}) ${result.error.message}`,
+  );
+}
