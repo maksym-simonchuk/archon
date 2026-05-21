@@ -5,6 +5,7 @@
 // implementations live in src/commands.ts (reused by the shell).
 
 import { cmdIndex, cmdPlan, cmdRun, cmdStatus } from './commands';
+import { cmdInit } from './init';
 import { buildRuntime, type Runtime } from './runtime';
 import { startShell } from './shell';
 
@@ -12,6 +13,7 @@ const HELP = `archon — constrained AI staff-engineer runtime (MVP)
 
 Usage:
   archon                  Launch the interactive shell
+  archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
   archon plan <goal>      Produce a plan tree — no writes               (M6)
   archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
@@ -45,6 +47,8 @@ async function main(argv: string[]): Promise<void> {
     case '--help':
       console.log(HELP);
       return;
+    case 'init':
+      return cmdInit(process.cwd());
     case 'index':
       return withRuntime(cmdIndex);
     case 'plan':
