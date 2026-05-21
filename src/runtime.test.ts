@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Task } from './core/types';
+import { MemoryStore } from './memory/store';
 import { buildRuntime } from './runtime';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
@@ -58,6 +59,29 @@ describe('buildRuntime (composition root)', () => {
     try {
       expect(runtime.llmPlanning).toBe(true);
       expect(runtime.router.spent).toBe(0); // nothing charged just by wiring
+    } finally {
+      runtime.close();
+    }
+  });
+
+  it('folds prior-run memory into the LLM context via the bundled retriever', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5'] }] });
+    const mem = new MemoryStore(join(root, '.archon/memory.db'));
+    mem.write({
+      id: 'episode:prev',
+      tier: 'episodic',
+      key: task.goal,
+      content: 'prior run of add a widget: passed=false',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+    mem.close();
+
+    const runtime = await buildRuntime(root);
+    try {
+      const ctx = await runtime.context(task);
+      expect(ctx).toContain('Relevant prior runs');
+      expect(ctx).toContain('passed=false');
     } finally {
       runtime.close();
     }

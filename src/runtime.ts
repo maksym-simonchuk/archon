@@ -110,11 +110,8 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const planner = (): Planner => new Planner(strategy);
 
-  const context = async (task: Task): Promise<string> => {
-    // The deterministic scaffolder ignores context, so don't pay to load the
-    // index + WASM ranking for it. With no index yet, there is no repo-map —
-    // returning '' also keeps a dry-run `plan` writeless (no db is opened).
-    if (!llmPlanning) return '';
+  // Repo-map working set from the index (empty when no index exists yet).
+  const repoMapContext = async (task: Task): Promise<string> => {
     const indexPath = join(root, config.paths.index);
     if (!existsSync(indexPath)) return '';
     const store = new IndexStore(indexPath);
@@ -127,6 +124,24 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     } finally {
       store.close();
     }
+  };
+
+  // Prior runs of this goal, semantically reranked by the bundled retriever
+  // (guarded on memory-db existence so a dry-run `plan` opens/creates nothing).
+  const memoryContext = async (task: Task): Promise<string> => {
+    if (!existsSync(join(root, config.paths.memory))) return '';
+    const retriever = createEmbeddingRetriever(await computeCore(), memory(), 'episodic', task.goal);
+    const hits = await retriever.retrieve(task.goal, 3);
+    return hits.length ? `# Relevant prior runs for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
+  };
+
+  const context = async (task: Task): Promise<string> => {
+    // The deterministic scaffolder ignores context, so don't pay to load the
+    // index / WASM / memory for it. Returning '' also keeps a dry-run `plan`
+    // writeless. Memory (prior runs) is ordered ahead of the repo map.
+    if (!llmPlanning) return '';
+    const sections = [await memoryContext(task), await repoMapContext(task)];
+    return sections.filter((s) => s.length > 0).join('\n');
   };
 
   const loop = (): CognitionLoop =>
