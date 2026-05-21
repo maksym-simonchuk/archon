@@ -1,0 +1,16 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env*
+
+# Rust / WASM build artifacts
+target/
+crates/*/target/
+crates/*/pkg/
+*.wasm
+
+# Archon runtime state — keep policy.yaml + README only
+.archon/*
+!.archon/policy.yaml
+!.archon/README.md

@@ -1,0 +1,21 @@
+{
+  "name": "archon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Constrained AI staff-engineer runtime embedded in a repository.",
+  "bin": { "archon": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:wasm": "wasm-pack build crates/archon-core --target nodejs --out-dir pkg",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

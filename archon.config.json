@@ -1,0 +1,16 @@
+{
+  "profile": "safe",
+  "providers": [
+    { "id": "anthropic", "models": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"] },
+    { "id": "openai", "models": ["gpt-4o", "gpt-4o-mini"] }
+  ],
+  "routing": {
+    "plan": "claude-sonnet-4-6",
+    "summarize": "claude-haiku-4-5-20251001",
+    "reason": "claude-opus-4-7",
+    "diff": "claude-opus-4-7",
+    "fallback": ["claude-sonnet-4-6", "gpt-4o"]
+  },
+  "budgets": { "perTaskUsd": 2.0, "globalDailyUsd": 25.0, "contextTokensMax": 60000 },
+  "paths": { "policy": ".archon/policy.yaml", "journal": ".archon/journal", "memory": ".archon/memory" }
+}

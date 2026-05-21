@@ -1,0 +1,40 @@
+# Machine-enforced safety policy. Mirrors AGENTS.md.
+# The Capability Broker evaluates every side effect against the active profile.
+# See ADR-0003 (single broker) and ADR-0010 (safe-by-default).
+version: 0
+active_profile: safe
+
+defaults:
+  # Anything not explicitly allowed is denied (default-deny, esp. outside the repo).
+  decision: deny
+
+profiles:
+  safe:
+    description: Default. Read freely, write narrowly, ask on risk, deny destructive.
+    allow:
+      - { action: fs.read, target: "**" }
+      - { action: fs.write, target: "**", when: { blast_radius_files_max: 5 } }
+      - { action: exec, target: ["npm", "node", "tsc", "tsx", "git status", "git diff", "git add", "git commit"] }
+    ask:
+      - { action: fs.write, when: { blast_radius_files_exceeds: 5 } }
+      - { action: fs.write, when: { lines_changed_min: 50 } }
+      - { action: fs.delete }
+      - { action: exec, target: ["git checkout", "git merge", "git worktree"] }
+      - { action: net }                       # any network egress
+    deny:
+      - { action: exec, target: ["git push --force", "git push -f", "git reset --hard", "git rebase", "rm -rf"] }
+      - { action: secret.read, target: ["**/.env*", "**/secrets/**", "**/*.pem", "**/id_rsa*"] }
+
+  trusted:
+    description: Higher autonomy inside an isolated worktree. Destructive class still denied.
+    inherits: safe
+    allow:
+      - { action: fs.write, target: "**", when: { in_worktree: true } }
+      - { action: exec, target: ["git checkout", "git merge", "git worktree", "git push"] }
+
+# Hard limits, independent of profile. Exceeding always escalates to ask/deny.
+limits:
+  blast_radius_files_max: 25
+  per_task_usd: 2.00
+  global_daily_usd: 25.00
+  context_tokens_max: 60000

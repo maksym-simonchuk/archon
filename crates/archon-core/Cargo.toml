@@ -1,0 +1,23 @@
+[package]
+name = "archon-core"
+version = "0.0.0"
+edition = "2021"
+description = "CPU-bound compute kernels for Archon, compiled to WebAssembly."
+license = "MIT"
+publish = false
+
+[lib]
+# cdylib -> wasm artifact; rlib -> native unit tests / benches.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+
+# Real deps land with their milestone (kept out until used — see AGENTS.md):
+#   blake3                            -> hash_files        (M1)
+#   tree-sitter, tree-sitter-<lang>   -> parse_symbols     (M1)
+#   serde, serde_json                 -> boundary payloads (M1)
+
+[profile.release]
+opt-level = 3      # compute core: optimize for speed (size is secondary)
+lto = true
