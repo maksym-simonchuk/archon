@@ -5,6 +5,7 @@
 // implementations live in src/commands.ts (reused by the shell).
 
 import {
+  cmdAsk,
   cmdDoctor,
   cmdIndex,
   cmdMemory,
@@ -28,6 +29,7 @@ Usage:
   archon index            Incrementally index changed files            (M1)
   archon plan <goal>      Produce a plan tree — no writes               (M6)
   archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
+  archon ask <question>   Stream a freeform answer (read-only)          (M7)
   archon status           Show task journal + budgets                   (M0)
   archon doctor           Report runtime readiness (planner/keys/state)
   archon memory           List memory-promotion candidates              (M5)
@@ -73,6 +75,9 @@ async function main(argv: string[]): Promise<void> {
     case 'run':
       if (!goal) return usageError('run <goal>');
       return withRuntime((rt) => cmdRun(rt, goal));
+    case 'ask':
+      if (!goal) return usageError('ask <question>');
+      return withRuntime((rt) => cmdAsk(rt, goal));
     case 'status':
       return withRuntime(cmdStatus);
     case 'doctor':

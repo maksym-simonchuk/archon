@@ -25,6 +25,14 @@ const client = (provider: string, opts: { fail?: boolean; tag?: string } = {}): 
     if (opts.fail) throw new Error(`${provider} unavailable`);
     return { object: schema.parse({ picked: opts.tag ?? m.id }), inputTokens: 1000, outputTokens: 1000 };
   },
+  completeStream: (m: ModelSpec) => {
+    const text = `${opts.tag ?? m.id}:streamed`;
+    async function* gen(): AsyncGenerator<string> {
+      yield text.slice(0, 2);
+      yield text.slice(2);
+    }
+    return { textStream: gen(), usage: Promise.resolve({ inputTokens: 1000, outputTokens: 1000 }) };
+  },
 });
 
 const req = (taskClass: TaskClass, prompt: string) => ({ taskClass, prompt, maxTokens: 256 });
@@ -84,5 +92,22 @@ describe('ProviderRouter (M7)', () => {
     );
     const out = await router.completeObject(req('diff', 'patch'), z.object({ picked: z.string() }));
     expect(out.object).toEqual({ picked: 'backup' });
+  });
+
+  it('streamComplete emits each chunk through the callback, then charges once', async () => {
+    const router = new ProviderRouter([model('cheap', 'a', ['summarize'], 0.5)], [client('a', { tag: 'A' })]);
+    const chunks: string[] = [];
+    const out = await router.streamComplete(req('summarize', 'hi'), (c) => chunks.push(c));
+    expect(chunks).toEqual(['A:', 'streamed']); // delivered incrementally, not in one shot
+    expect(out.text).toBe('A:streamed');
+    expect(out.modelId).toBe('cheap');
+    expect(out.costUsd).toBeCloseTo(1); // (1k in + 1k out) @ $0.5/1k — same charge math as complete()
+    expect(router.spent).toBeCloseTo(1);
+  });
+
+  it('streamComplete still trips the budget breaker before opening a stream', async () => {
+    const router = new ProviderRouter([model('m', 'a', ['summarize'], 1)], [client('a')], { budgetUsd: 1.5 });
+    await router.streamComplete(req('summarize', 'p1'), () => {}); // spends $2
+    await expect(router.streamComplete(req('summarize', 'p2'), () => {})).rejects.toThrow(/budget exhausted/);
   });
 });

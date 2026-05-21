@@ -58,6 +58,26 @@ export function journalHint(e: JournalEntry): string {
   }
 }
 
+/**
+ * Stream a freeform answer from the provider, token by token (the shell's
+ * "typing" feel). Read-only: it routes through `summarize` (a cheap model) and
+ * proposes no effects, so nothing is broker-gated. Requires an LLM provider —
+ * the offline scaffolder cannot stream.
+ */
+export async function cmdAsk(rt: Runtime, question: string): Promise<void> {
+  if (!rt.llmPlanning) {
+    console.log('ask: no LLM provider configured — set a provider key (see `archon doctor`)');
+    return;
+  }
+  const prompt = `Answer concisely for an engineer working in this repository.\n\nQuestion: ${question}\n`;
+  const { modelId, costUsd } = await rt.router.streamComplete(
+    { taskClass: 'summarize', prompt, maxTokens: 1024 },
+    (chunk) => process.stdout.write(chunk),
+  );
+  process.stdout.write('\n');
+  console.log(`— ${modelId} ($${costUsd.toFixed(4)})`);
+}
+
 export async function cmdPlan(rt: Runtime, goal: string): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, rt.config.profile);

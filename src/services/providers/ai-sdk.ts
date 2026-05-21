@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, Output, type LanguageModel } from 'ai';
+import { generateText, Output, streamText, type LanguageModel } from 'ai';
 import type { ZodType } from 'zod';
 import type { ModelSpec } from '../../core/types';
 import type { ProviderClient } from '../provider-router';
@@ -64,6 +64,24 @@ export function createAiClient(provider: AiProvider, apiKey: string, fetchImpl?:
         object: output,
         inputTokens: usage?.inputTokens ?? 0,
         outputTokens: usage?.outputTokens ?? 0,
+      };
+    },
+
+    completeStream(spec: ModelSpec, prompt: string, maxTokens: number) {
+      const result = streamText({
+        model: resolve(spec.id),
+        prompt,
+        maxOutputTokens: maxTokens,
+        maxRetries: 0,
+      });
+      return {
+        textStream: result.textStream,
+        // `result.usage` is a PromiseLike; Promise.resolve lifts it to a real
+        // Promise so it satisfies the router's `usage: Promise<…>` contract.
+        usage: Promise.resolve(result.usage).then((u) => ({
+          inputTokens: u.inputTokens ?? 0,
+          outputTokens: u.outputTokens ?? 0,
+        })),
       };
     },
   };

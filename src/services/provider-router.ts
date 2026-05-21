@@ -17,6 +17,16 @@ export interface ProviderClient {
     maxTokens: number,
     schema: ZodType<T>,
   ): Promise<{ object: T; inputTokens: number; outputTokens: number }>;
+  /**
+   * Optional streaming text. Providers that implement it enable
+   * `router.streamComplete` (the shell's `/ask`); `usage` resolves when the
+   * stream finishes, for cost accounting.
+   */
+  completeStream?(
+    model: ModelSpec,
+    prompt: string,
+    maxTokens: number,
+  ): { textStream: AsyncIterable<string>; usage: Promise<{ inputTokens: number; outputTokens: number }> };
 }
 
 /** Result of a structured completion — like `Completion`, but carrying a typed object instead of text. */
@@ -113,15 +123,49 @@ export class ProviderRouter {
    * caller supplies the per-attempt provider call and gets back the produced
    * value plus the charged model + tokens.
    */
-  private async route<R>(
-    taskClass: TaskClass,
-    call: (model: ModelSpec, client: ProviderClient) => Promise<{ value: R; inputTokens: number; outputTokens: number }>,
-  ): Promise<{ value: R; modelId: string; inputTokens: number; outputTokens: number; costUsd: number }> {
+  /**
+   * Stream a text completion to `onChunk` as tokens arrive, charging after the
+   * stream ends. Unlike `complete`, there is no mid-stream fallback — once a
+   * model is chosen and the first token is emitted, we commit to it (budget is
+   * still guarded up front). Powers the shell's `/ask`.
+   */
+  async streamComplete(
+    req: RouteRequest,
+    onChunk: (text: string) => void,
+  ): Promise<{ modelId: string; text: string; costUsd: number }> {
+    this.budgetGuard();
+    for (const modelId of this.routeChain(req.taskClass)) {
+      const model = this.models.get(modelId);
+      const client = model && this.clients.get(model.provider);
+      if (!model || !client?.completeStream) continue;
+      const { textStream, usage } = client.completeStream(model, req.prompt, req.maxTokens);
+      let text = '';
+      for await (const chunk of textStream) {
+        text += chunk;
+        onChunk(chunk);
+      }
+      const { inputTokens, outputTokens } = await usage;
+      const costUsd =
+        (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
+      this.spentUsd += costUsd;
+      return { modelId, text, costUsd };
+    }
+    throw new Error(`[archon] no streaming model routes to task class "${req.taskClass}"`);
+  }
+
+  private budgetGuard(): void {
     if (this.opts.budgetUsd !== undefined && this.spentUsd >= this.opts.budgetUsd) {
       throw new Error(
         `[archon] provider budget exhausted ($${this.spentUsd.toFixed(2)} ≥ $${this.opts.budgetUsd.toFixed(2)})`,
       );
     }
+  }
+
+  private async route<R>(
+    taskClass: TaskClass,
+    call: (model: ModelSpec, client: ProviderClient) => Promise<{ value: R; inputTokens: number; outputTokens: number }>,
+  ): Promise<{ value: R; modelId: string; inputTokens: number; outputTokens: number; costUsd: number }> {
+    this.budgetGuard();
 
     const chain = this.routeChain(taskClass);
     if (chain.length === 0) throw new Error(`[archon] no model routes to task class "${taskClass}"`);

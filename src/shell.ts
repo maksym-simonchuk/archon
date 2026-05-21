@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
+  cmdAsk,
   cmdDoctor,
   cmdIndex,
   cmdMemory,
@@ -24,6 +25,7 @@ const HISTORY_MAX = 1000;
 const COMMANDS = [
   '/plan',
   '/run',
+  '/ask',
   '/index',
   '/status',
   '/doctor',
@@ -39,6 +41,7 @@ const COMMANDS = [
 const SHELL_HELP = `commands:
   /plan <goal>     plan a task — no writes
   /run <goal>      plan → act → verify under a worktree transaction
+  /ask <question>  stream a freeform answer (read-only)
   /index           incrementally index changed files
   /status          task journal + budgets
   /doctor          runtime readiness (planner/keys/state/plugins)
@@ -107,6 +110,9 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
       return true;
     case '/run':
       if (needGoal()) await cmdRun(rt, arg);
+      return true;
+    case '/ask':
+      if (needGoal()) await cmdAsk(rt, arg);
       return true;
     case '/index':
       await cmdIndex(rt);
