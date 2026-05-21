@@ -24,13 +24,17 @@ import { IndexStore } from './sensing/store';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
 import { AnthropicClient } from './services/providers/anthropic';
+import { OpenAiClient } from './services/providers/openai';
 import { resolveModels } from './services/model-catalog';
 import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 import { TaskJournal } from './services/task-journal';
 
 /** Maps a provider id to the env var holding its API key — single source of truth. */
-const PROVIDER_ENV: Record<string, string> = { anthropic: 'ANTHROPIC_API_KEY' };
+const PROVIDER_ENV: Record<string, string> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'OPENAI_API_KEY',
+};
 
 /** The provider's API key from the environment, or undefined if unset/unknown. */
 function envKey(id: string): string | undefined {
@@ -43,7 +47,9 @@ function buildClients(providers: { id: string }[]): ProviderClient[] {
   const clients: ProviderClient[] = [];
   for (const p of providers) {
     const key = envKey(p.id);
-    if (p.id === 'anthropic' && key) clients.push(new AnthropicClient(key));
+    if (!key) continue;
+    if (p.id === 'anthropic') clients.push(new AnthropicClient(key));
+    else if (p.id === 'openai') clients.push(new OpenAiClient(key));
   }
   return clients;
 }

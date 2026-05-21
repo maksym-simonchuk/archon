@@ -32,6 +32,22 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     costPer1kOutput: 0.004,
     strengths: ['summarize', 'plan', 'embed'],
   },
+  'gpt-4o': {
+    id: 'gpt-4o',
+    provider: 'openai',
+    contextWindow: 128_000,
+    costPer1kInput: 0.0025,
+    costPer1kOutput: 0.01,
+    strengths: ['reason', 'plan', 'diff'],
+  },
+  'gpt-4o-mini': {
+    id: 'gpt-4o-mini',
+    provider: 'openai',
+    contextWindow: 128_000,
+    costPer1kInput: 0.00015,
+    costPer1kOutput: 0.0006,
+    strengths: ['summarize', 'plan', 'embed'],
+  },
 };
 
 /**
