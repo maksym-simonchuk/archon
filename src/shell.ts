@@ -1,5 +1,14 @@
 import { createInterface } from 'node:readline';
-import { cmdIndex, cmdMemory, cmdPlan, cmdRun, cmdStatus, plannerLabel } from './commands';
+import {
+  cmdIndex,
+  cmdMemory,
+  cmdPlan,
+  cmdPromote,
+  cmdPromotions,
+  cmdRun,
+  cmdStatus,
+  plannerLabel,
+} from './commands';
 import { buildRuntime, type Runtime } from './runtime';
 
 const PROMPT = 'archon› ';
@@ -9,7 +18,8 @@ const SHELL_HELP = `commands:
   /run <goal>      plan → act → verify under a worktree transaction
   /index           incrementally index changed files
   /status          task journal + budgets
-  /memory <goal>   recall prior episodes for a goal (retriever-ranked)
+  /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
+  /promote <id>    confirm a memory promotion (the human gate)
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
   <text>           shorthand for /plan <text>`;
@@ -51,7 +61,11 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
       await cmdStatus(rt);
       return true;
     case '/memory':
-      if (needGoal()) await cmdMemory(rt, arg);
+      await (arg ? cmdMemory(rt, arg) : cmdPromotions(rt));
+      return true;
+    case '/promote':
+      if (arg) await cmdPromote(rt, arg);
+      else console.log('usage: /promote <id>');
       return true;
     default:
       if (head.startsWith('/')) {

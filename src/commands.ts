@@ -6,6 +6,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
 import type { JournalEntry, Profile, StepResult, Task } from './core/types';
+import { PromotionEngine } from './memory/promotion';
 import type { Runtime } from './runtime';
 import { TaskJournal } from './services/task-journal';
 
@@ -115,4 +116,29 @@ export async function cmdMemory(rt: Runtime, goal: string): Promise<void> {
   }
   console.log(`memory: ${hits.length} prior episode(s) for "${goal}" (most relevant first):`);
   for (const h of hits) console.log(`  - ${h}`);
+}
+
+/** List records that meet the promotion bar (frequency + success), pending confirmation. */
+export async function cmdPromotions(rt: Runtime): Promise<void> {
+  if (!existsSync(join(rt.root, rt.config.paths.memory))) {
+    console.log('memory: empty (no runs yet)');
+    return;
+  }
+  const candidates = await new PromotionEngine(rt.memory()).propose();
+  if (candidates.length === 0) {
+    console.log('memory: no records meet the promotion bar (freq ≥ 3 + success ≥ 2)');
+    return;
+  }
+  console.log(`memory: ${candidates.length} promotion candidate(s) — confirm with \`memory promote <id>\`:`);
+  for (const c of candidates) console.log(`  ${c.id}  [${c.tier} ↑]  ${c.key}`);
+}
+
+/** The human gate: confirm a candidate, moving it one tier up (episodic → semantic → procedural). */
+export async function cmdPromote(rt: Runtime, id: string): Promise<void> {
+  const tier = await new PromotionEngine(rt.memory()).confirm(id);
+  console.log(
+    tier
+      ? `memory: promoted ${id} → ${tier}`
+      : `memory: "${id}" is not promotable (unknown id or already at the top tier)`,
+  );
 }

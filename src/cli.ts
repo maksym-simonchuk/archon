@@ -4,7 +4,7 @@
 // composes through the single runtime root (buildRuntime); the shared command
 // implementations live in src/commands.ts (reused by the shell).
 
-import { cmdIndex, cmdPlan, cmdRun, cmdStatus } from './commands';
+import { cmdIndex, cmdMemory, cmdPlan, cmdPromote, cmdPromotions, cmdRun, cmdStatus } from './commands';
 import { cmdInit } from './init';
 import { buildRuntime, type Runtime } from './runtime';
 import { startShell } from './shell';
@@ -18,6 +18,8 @@ Usage:
   archon plan <goal>      Produce a plan tree — no writes               (M6)
   archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
   archon status           Show task journal + budgets                   (M0)
+  archon memory           List memory-promotion candidates              (M5)
+  archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon --help           Show this help
 
 See docs/ROADMAP.md and AGENTS.md.`;
@@ -59,6 +61,21 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdRun(rt, goal));
     case 'status':
       return withRuntime(cmdStatus);
+    case 'memory': {
+      const [sub, ...more] = rest;
+      if (sub === 'promote') {
+        const id = more[0];
+        if (!id) return usageError('memory promote <id>');
+        return withRuntime((rt) => cmdPromote(rt, id));
+      }
+      if (sub === 'recall') {
+        const g = more.join(' ').trim();
+        if (!g) return usageError('memory recall <goal>');
+        return withRuntime((rt) => cmdMemory(rt, g));
+      }
+      if (sub) return usageError('memory [promote <id> | recall <goal>]');
+      return withRuntime(cmdPromotions);
+    }
     default:
       console.error(`unknown command: ${cmd}\n`);
       console.log(HELP);
