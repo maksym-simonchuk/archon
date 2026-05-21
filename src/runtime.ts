@@ -29,13 +29,21 @@ import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 import { TaskJournal } from './services/task-journal';
 
+/** Maps a provider id to the env var holding its API key — single source of truth. */
+const PROVIDER_ENV: Record<string, string> = { anthropic: 'ANTHROPIC_API_KEY' };
+
+/** The provider's API key from the environment, or undefined if unset/unknown. */
+function envKey(id: string): string | undefined {
+  const name = PROVIDER_ENV[id];
+  return name ? process.env[name] : undefined;
+}
+
 /** Build the concrete provider clients for which an API key is present in env. */
 function buildClients(providers: { id: string }[]): ProviderClient[] {
   const clients: ProviderClient[] = [];
   for (const p of providers) {
-    if (p.id === 'anthropic' && process.env.ANTHROPIC_API_KEY) {
-      clients.push(new AnthropicClient(process.env.ANTHROPIC_API_KEY));
-    }
+    const key = envKey(p.id);
+    if (p.id === 'anthropic' && key) clients.push(new AnthropicClient(key));
   }
   return clients;
 }
@@ -53,6 +61,8 @@ export interface Runtime {
   readonly router: ProviderRouter;
   /** True when an LLM-backed planner is active (a provider key was found). */
   readonly llmPlanning: boolean;
+  /** Configured providers: whether a client-builder exists (`supported`) and whether its key is in the env (key value never exposed). */
+  readonly providerStatus: { id: string; supported: boolean; keyPresent: boolean }[];
   /** Planner using the chosen strategy (ProviderPlanner, else ScaffoldStrategy). */
   planner(): Planner;
   /** Assemble the budgeted repo-map context for a task (empty for the offline planner). */
@@ -101,6 +111,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const llmPlanning = models.length > 0 && clients.length > 0;
   const strategy: PlanStrategy = llmPlanning ? new ProviderPlanner(router) : new ScaffoldStrategy();
+  const providerStatus = config.providers.map((p) => ({
+    id: p.id,
+    supported: PROVIDER_ENV[p.id] !== undefined,
+    keyPresent: Boolean(envKey(p.id)),
+  }));
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
     new CapabilityBroker(new PolicyEngine(policyDoc, profile), audit, cwd);
@@ -199,6 +214,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     root,
     router,
     llmPlanning,
+    providerStatus,
     planner,
     context,
     brokerAt,

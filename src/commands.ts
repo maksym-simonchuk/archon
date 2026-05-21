@@ -144,6 +144,41 @@ export async function cmdPromote(rt: Runtime, id: string): Promise<void> {
 }
 
 /**
+ * Readiness report: planner choice, configured providers + whether each key is
+ * present (never the key itself), budgets, which `.archon/*.db` exist, and how
+ * many plugins are loaded. Strictly read-only — it creates no db (existence is
+ * probed, not opened), so running `doctor` never changes the repo.
+ */
+export async function cmdDoctor(rt: Runtime): Promise<void> {
+  const { config } = rt;
+  console.log(`archon doctor — ${rt.root}`);
+  console.log(`  node:      ${process.version}`);
+  console.log(`  profile:   ${config.profile}`);
+  console.log(`  planner:   ${rt.llmPlanning ? 'llm (provider-router)' : 'deterministic (scaffold)'}`);
+
+  if (config.providers.length === 0) {
+    console.log('  providers: none configured → offline scaffold planner');
+  } else {
+    console.log('  providers:');
+    for (const p of rt.providerStatus) {
+      const state = !p.supported ? 'unsupported (no client yet)' : p.keyPresent ? 'key present' : 'key missing';
+      console.log(`    - ${p.id}: ${state}`);
+    }
+  }
+
+  const b = config.budgets;
+  console.log(`  budgets:   $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`);
+
+  const present = (rel: string): string => (existsSync(join(rt.root, rel)) ? 'present' : 'absent');
+  console.log('  state:');
+  console.log(`    - index:   ${present(config.paths.index)}`);
+  console.log(`    - memory:  ${present(config.paths.memory)}`);
+  console.log(`    - journal: ${present(config.paths.journal)}`);
+
+  console.log(`  plugins:   ${(await rt.pluginHost()).list().length} loaded`);
+}
+
+/**
  * List plugins loaded from `.archon/plugins/`, previewing each declared
  * capability against the active policy. The same gate runs at invoke time, so a
  * `⚠` plugin (any capability not `allow`ed) won't run cleanly under this profile.

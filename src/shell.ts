@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
+  cmdDoctor,
   cmdIndex,
   cmdMemory,
   cmdPlan,
@@ -24,6 +25,7 @@ const COMMANDS = [
   '/run',
   '/index',
   '/status',
+  '/doctor',
   '/memory',
   '/promote',
   '/plugins',
@@ -37,6 +39,7 @@ const SHELL_HELP = `commands:
   /run <goal>      plan → act → verify under a worktree transaction
   /index           incrementally index changed files
   /status          task journal + budgets
+  /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
@@ -107,6 +110,9 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
       return true;
     case '/status':
       await cmdStatus(rt);
+      return true;
+    case '/doctor':
+      await cmdDoctor(rt);
       return true;
     case '/memory':
       await (arg ? cmdMemory(rt, arg) : cmdPromotions(rt));
