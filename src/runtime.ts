@@ -23,8 +23,7 @@ import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
-import { AnthropicClient } from './services/providers/anthropic';
-import { OpenAiClient } from './services/providers/openai';
+import { createAiClient } from './services/providers/ai-sdk';
 import { resolveModels } from './services/model-catalog';
 import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
@@ -48,8 +47,7 @@ function buildClients(providers: { id: string }[]): ProviderClient[] {
   for (const p of providers) {
     const key = envKey(p.id);
     if (!key) continue;
-    if (p.id === 'anthropic') clients.push(new AnthropicClient(key));
-    else if (p.id === 'openai') clients.push(new OpenAiClient(key));
+    if (p.id === 'anthropic' || p.id === 'openai') clients.push(createAiClient(p.id, key));
   }
   return clients;
 }
