@@ -1,21 +1,33 @@
+import { z } from 'zod';
 import type { BlastRadius, PlanStep, Task } from '../core/types';
 import type { ProviderRouter } from '../services/provider-router';
-import type { CognitivePlan, PlanStrategy, StepAction, VerifierCheck } from './types';
+import type { CognitivePlan, PlanStrategy, StepAction } from './types';
 
-interface RawStep {
-  intent: string;
-  action: { kind: 'write'; target: string; content: string };
-}
-interface RawPlan {
-  rationale: string;
-  steps: RawStep[];
-  checks: VerifierCheck[];
-}
+/**
+ * The plan the model must produce. The provider is asked to emit JSON matching
+ * this schema (via the AI SDK's structured output) and the SDK validates it
+ * before we ever see it — so the planner never parses prose or strips markdown
+ * fences. A schema violation rejects at the provider boundary; the loop then
+ * discards rather than acting on garbage.
+ */
+const planSchema = z.object({
+  rationale: z.string(),
+  steps: z.array(
+    z.object({
+      intent: z.string(),
+      action: z.object({
+        kind: z.literal('write'),
+        target: z.string(),
+        content: z.string(),
+      }),
+    }),
+  ),
+  checks: z.array(z.object({ name: z.string(), argv: z.array(z.string()) })),
+});
 
-const SCHEMA = `Respond with ONLY a JSON object (no prose, no markdown fences) of this exact shape:
-{"rationale": string,
- "steps": [{"intent": string, "action": {"kind": "write", "target": "<repo-relative path>", "content": "<full file contents>"}}],
- "checks": [{"name": string, "argv": [string, ...]}]}
+type RawPlan = z.infer<typeof planSchema>;
+
+const INSTRUCTIONS = `You are Archon's planner. Produce a minimal, reversible plan to accomplish the goal.
 Rules: each step writes exactly one file; targets are repo-relative (never absolute, never "..");
 "argv" runs with no shell, e.g. ["npm","run","typecheck"] or ["node","path/to/test.mjs"];
 include at least one check that proves the work; keep steps minimal and individually reversible.`;
@@ -24,12 +36,10 @@ const radius = (file: string): BlastRadius => ({ files: [file], symbols: [], esc
 
 /**
  * LLM-backed planner: asks the ProviderRouter (task class `plan`) for a
- * structured JSON plan and converts it to a `CognitivePlan`. The model's output
- * is validated against the schema and rejected if malformed — the loop then
- * discards rather than acting on garbage. Crucially, a hostile/incompetent plan
- * is still harmless: every write/exec it proposes is gated by the Capability
- * Broker at execution time (repo containment, blast-radius, policy), so the
- * planner is untrusted by design.
+ * schema-validated plan and converts it to a `CognitivePlan`. Crucially, a
+ * hostile/incompetent plan is still harmless: every write/exec it proposes is
+ * gated by the Capability Broker at execution time (repo containment,
+ * blast-radius, policy), so the planner is untrusted by design.
  */
 export class ProviderPlanner implements PlanStrategy {
   constructor(
@@ -38,9 +48,11 @@ export class ProviderPlanner implements PlanStrategy {
   ) {}
 
   async propose(task: Task, context: string): Promise<CognitivePlan> {
-    const prompt = `${SCHEMA}\n\n# Goal\n${task.goal}\n\n# Repository context\n${context || '(none provided)'}\n`;
-    const completion = await this.router.complete({ taskClass: 'plan', prompt, maxTokens: this.maxTokens });
-    const raw = parsePlan(completion.text);
+    const prompt = `${INSTRUCTIONS}\n\n# Goal\n${task.goal}\n\n# Repository context\n${context || '(none provided)'}\n`;
+    const { object: raw } = await this.router.completeObject<RawPlan>(
+      { taskClass: 'plan', prompt, maxTokens: this.maxTokens },
+      planSchema,
+    );
 
     const steps: PlanStep[] = [];
     const actions: Record<string, StepAction> = {};
@@ -57,43 +69,4 @@ export class ProviderPlanner implements PlanStrategy {
 
     return { plan: { taskId: task.id, rationale: raw.rationale, steps }, actions, checks: raw.checks };
   }
-}
-
-/** Pull a JSON object out of a completion that may be fenced or prose-wrapped. */
-function extractJson(text: string): string {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1] : text;
-  const start = body.indexOf('{');
-  const end = body.lastIndexOf('}');
-  return start >= 0 && end > start ? body.slice(start, end + 1) : body;
-}
-
-function parsePlan(text: string): RawPlan {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(extractJson(text));
-  } catch {
-    throw new Error('[archon] planner: model did not return valid JSON');
-  }
-  if (!isRawPlan(parsed)) throw new Error('[archon] planner: JSON did not match the plan schema');
-  return parsed;
-}
-
-function isRawPlan(v: unknown): v is RawPlan {
-  if (typeof v !== 'object' || v === null) return false;
-  const o = v as Record<string, unknown>;
-  if (typeof o.rationale !== 'string' || !Array.isArray(o.steps) || !Array.isArray(o.checks)) return false;
-  for (const s of o.steps) {
-    if (typeof s !== 'object' || s === null) return false;
-    const st = s as Record<string, unknown>;
-    const a = st.action as Record<string, unknown> | undefined;
-    if (typeof st.intent !== 'string') return false;
-    if (!a || a.kind !== 'write' || typeof a.target !== 'string' || typeof a.content !== 'string') return false;
-  }
-  for (const c of o.checks) {
-    if (typeof c !== 'object' || c === null) return false;
-    const ck = c as Record<string, unknown>;
-    if (typeof ck.name !== 'string' || !Array.isArray(ck.argv) || !ck.argv.every((x) => typeof x === 'string')) return false;
-  }
-  return true;
 }

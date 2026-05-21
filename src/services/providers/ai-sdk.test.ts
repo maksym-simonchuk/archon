@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { ModelSpec } from '../../core/types';
 import { createAiClient } from './ai-sdk';
 
@@ -59,6 +60,34 @@ describe('createAiClient (AI SDK ProviderClient)', () => {
 
     expect(out).toEqual({ text: 'hello world', inputTokens: 11, outputTokens: 22 });
     expect(calls.some((u) => u.includes('/chat/completions'))).toBe(true);
+  });
+
+  it('completeObject asks the provider for schema-shaped JSON and returns the typed object', async () => {
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          id: 'x',
+          object: 'chat.completion',
+          created: 0,
+          model: 'gpt-x',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: JSON.stringify({ title: 'hi', n: 3 }) },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 7 },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )) as typeof fetch;
+
+    const client = createAiClient('openai', 'sk-test', fetchImpl);
+    const schema = z.object({ title: z.string(), n: z.number() });
+    const out = await client.completeObject(spec('gpt-x', 'openai'), 'go', 128, schema);
+
+    expect(out.object).toEqual({ title: 'hi', n: 3 });
+    expect([out.inputTokens, out.outputTokens]).toEqual([5, 7]);
   });
 
   it('propagates a provider error instead of swallowing it', async () => {

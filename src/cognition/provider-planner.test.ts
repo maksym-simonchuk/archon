@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import type { ModelSpec, Task } from '../core/types';
 import { ProviderRouter, type ProviderClient } from '../services/provider-router';
 import { ProviderPlanner } from './provider-planner';
@@ -14,26 +15,36 @@ const model: ModelSpec = {
   strengths: ['plan'],
 };
 
-/** A router whose only client returns `text` verbatim for any prompt. */
-const routerReturning = (text: string): ProviderRouter => {
+/**
+ * A router whose client validates a fixed payload through the planner's schema
+ * — exactly what the real SDK-backed client does (provider emits JSON, the SDK
+ * validates against the schema). A payload that violates the schema throws at
+ * `schema.parse`, mirroring a real schema rejection at the provider boundary.
+ */
+const routerReturning = (payload: unknown): ProviderRouter => {
   const client: ProviderClient = {
     provider: 'fake',
-    complete: async () => ({ text, inputTokens: 1, outputTokens: 1 }),
+    complete: async () => ({ text: '', inputTokens: 1, outputTokens: 1 }),
+    completeObject: async <T,>(_m: ModelSpec, _p: string, _mt: number, schema: z.ZodType<T>) => ({
+      object: schema.parse(payload),
+      inputTokens: 1,
+      outputTokens: 1,
+    }),
   };
   return new ProviderRouter([model], [client]);
 };
 
-const VALID = JSON.stringify({
+const VALID_PLAN = {
   rationale: 'write a foo module and self-test it',
   steps: [
     { intent: 'write foo', action: { kind: 'write', target: 'src/foo.mjs', content: 'export const foo = () => 1;' } },
   ],
   checks: [{ name: 'foo-test', argv: ['node', 'src/foo.test.mjs'] }],
-});
+};
 
 describe('ProviderPlanner (LLM-backed plan strategy)', () => {
-  it('parses a structured plan into a CognitivePlan with broker-gated steps', async () => {
-    const cog = await new ProviderPlanner(routerReturning(VALID)).propose(task, 'ctx');
+  it('maps a schema-validated plan into a CognitivePlan with broker-gated steps', async () => {
+    const cog = await new ProviderPlanner(routerReturning(VALID_PLAN)).propose(task, 'ctx');
 
     expect(cog.plan.taskId).toBe('t1');
     expect(cog.plan.rationale).toBe('write a foo module and self-test it');
@@ -55,27 +66,11 @@ describe('ProviderPlanner (LLM-backed plan strategy)', () => {
     expect(cog.checks).toEqual([{ name: 'foo-test', argv: ['node', 'src/foo.test.mjs'] }]);
   });
 
-  it('tolerates a ```json fenced or prose-wrapped completion', async () => {
-    const fenced = await new ProviderPlanner(routerReturning('```json\n' + VALID + '\n```')).propose(task, '');
-    expect(fenced.plan.steps[0].capability.target).toBe('src/foo.mjs');
+  it('rejects when the provider payload violates the plan schema', async () => {
+    const offSchema = { rationale: 'r', steps: 'not-an-array', checks: [] };
+    await expect(new ProviderPlanner(routerReturning(offSchema)).propose(task, '')).rejects.toThrow();
 
-    const prose = await new ProviderPlanner(
-      routerReturning(`Sure, here is the plan:\n${VALID}\nLet me know if that works.`),
-    ).propose(task, '');
-    expect(prose.plan.steps).toHaveLength(1);
-  });
-
-  it('throws when the model does not return valid JSON', async () => {
-    await expect(new ProviderPlanner(routerReturning('I cannot do that.')).propose(task, '')).rejects.toThrow(
-      /valid JSON/,
-    );
-  });
-
-  it('throws when the JSON does not match the plan schema', async () => {
-    const offSchema = JSON.stringify({ rationale: 'r', steps: 'not-an-array', checks: [] });
-    await expect(new ProviderPlanner(routerReturning(offSchema)).propose(task, '')).rejects.toThrow(/schema/);
-
-    const badStep = JSON.stringify({ rationale: 'r', steps: [{ intent: 'x' }], checks: [] });
-    await expect(new ProviderPlanner(routerReturning(badStep)).propose(task, '')).rejects.toThrow(/schema/);
+    const badStep = { rationale: 'r', steps: [{ intent: 'x' }], checks: [] }; // step missing `action`
+    await expect(new ProviderPlanner(routerReturning(badStep)).propose(task, '')).rejects.toThrow();
   });
 });

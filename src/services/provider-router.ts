@@ -1,3 +1,4 @@
+import type { ZodType } from 'zod';
 import type { Completion, ModelSpec, RouteRequest, TaskClass } from '../core/types';
 
 /** A provider's completion backend. HTTP clients (prod) and fakes (tests) share this. */
@@ -9,6 +10,22 @@ export interface ProviderClient {
     prompt: string,
     maxTokens: number,
   ): Promise<{ text: string; inputTokens: number; outputTokens: number }>;
+  /** Structured variant: the provider emits JSON conforming to `schema`, validated before return. */
+  completeObject<T>(
+    model: ModelSpec,
+    prompt: string,
+    maxTokens: number,
+    schema: ZodType<T>,
+  ): Promise<{ object: T; inputTokens: number; outputTokens: number }>;
+}
+
+/** Result of a structured completion — like `Completion`, but carrying a typed object instead of text. */
+export interface ObjectCompletion<T> {
+  object: T;
+  modelId: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
 }
 
 export interface RouterOptions {
@@ -53,14 +70,61 @@ export class ProviderRouter {
     const cached = this.cache.get(cacheKey);
     if (cached) return { ...cached, cached: true };
 
+    const routed = await this.route(req.taskClass, (model, client) =>
+      client
+        .complete(model, req.prompt, req.maxTokens)
+        .then((r) => ({ value: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
+    );
+    const completion: Completion = {
+      modelId: routed.modelId,
+      text: routed.value,
+      inputTokens: routed.inputTokens,
+      outputTokens: routed.outputTokens,
+      costUsd: routed.costUsd,
+      cached: false,
+    };
+    this.cache.set(cacheKey, completion);
+    return completion;
+  }
+
+  /**
+   * Structured sibling of `complete`: routes/charges/falls-back identically, but
+   * asks the provider for JSON conforming to `schema` (validated before return).
+   * Uncached — callers that want a plan re-derived per task expect a fresh call.
+   */
+  async completeObject<T>(req: RouteRequest, schema: ZodType<T>): Promise<ObjectCompletion<T>> {
+    const routed = await this.route(req.taskClass, (model, client) =>
+      client
+        .completeObject(model, req.prompt, req.maxTokens, schema)
+        .then((r) => ({ value: r.object, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
+    );
+    return {
+      object: routed.value,
+      modelId: routed.modelId,
+      inputTokens: routed.inputTokens,
+      outputTokens: routed.outputTokens,
+      costUsd: routed.costUsd,
+    };
+  }
+
+  /**
+   * Shared routing core for `complete`/`completeObject`: budget breaker, the
+   * task-class route chain, fallback on provider error, and cost accounting. The
+   * caller supplies the per-attempt provider call and gets back the produced
+   * value plus the charged model + tokens.
+   */
+  private async route<R>(
+    taskClass: TaskClass,
+    call: (model: ModelSpec, client: ProviderClient) => Promise<{ value: R; inputTokens: number; outputTokens: number }>,
+  ): Promise<{ value: R; modelId: string; inputTokens: number; outputTokens: number; costUsd: number }> {
     if (this.opts.budgetUsd !== undefined && this.spentUsd >= this.opts.budgetUsd) {
       throw new Error(
         `[archon] provider budget exhausted ($${this.spentUsd.toFixed(2)} ≥ $${this.opts.budgetUsd.toFixed(2)})`,
       );
     }
 
-    const chain = this.routeChain(req.taskClass);
-    if (chain.length === 0) throw new Error(`[archon] no model routes to task class "${req.taskClass}"`);
+    const chain = this.routeChain(taskClass);
+    if (chain.length === 0) throw new Error(`[archon] no model routes to task class "${taskClass}"`);
 
     let lastError: unknown;
     for (const modelId of chain) {
@@ -68,19 +132,17 @@ export class ProviderRouter {
       const client = model && this.clients.get(model.provider);
       if (!model || !client) continue;
       try {
-        const { text, inputTokens, outputTokens } = await client.complete(model, req.prompt, req.maxTokens);
+        const { value, inputTokens, outputTokens } = await call(model, client);
         const costUsd =
           (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
         this.spentUsd += costUsd;
-        const completion: Completion = { modelId, text, inputTokens, outputTokens, costUsd, cached: false };
-        this.cache.set(cacheKey, completion);
-        return completion;
+        return { value, modelId, inputTokens, outputTokens, costUsd };
       } catch (e) {
         lastError = e; // provider failed — fall through to the next in the chain
       }
     }
     throw new Error(
-      `[archon] all providers failed for "${req.taskClass}": ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+      `[archon] all providers failed for "${taskClass}": ${lastError instanceof Error ? lastError.message : String(lastError)}`,
     );
   }
 

@@ -1,6 +1,7 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateText, type LanguageModel } from 'ai';
+import { generateText, Output, type LanguageModel } from 'ai';
+import type { ZodType } from 'zod';
 import type { ModelSpec } from '../../core/types';
 import type { ProviderClient } from '../provider-router';
 
@@ -43,6 +44,24 @@ export function createAiClient(provider: AiProvider, apiKey: string, fetchImpl?:
       });
       return {
         text,
+        inputTokens: usage?.inputTokens ?? 0,
+        outputTokens: usage?.outputTokens ?? 0,
+      };
+    },
+
+    async completeObject<T>(spec: ModelSpec, prompt: string, maxTokens: number, schema: ZodType<T>) {
+      // `Output.object` makes the provider emit JSON conforming to `schema`
+      // (json-schema / tool mode), and the SDK validates it before returning —
+      // replacing the planner's hand-rolled fence-stripping + shape guards.
+      const { output, usage } = await generateText({
+        model: resolve(spec.id),
+        prompt,
+        maxOutputTokens: maxTokens,
+        maxRetries: 0,
+        output: Output.object({ schema }),
+      });
+      return {
+        object: output,
         inputTokens: usage?.inputTokens ?? 0,
         outputTokens: usage?.outputTokens ?? 0,
       };
