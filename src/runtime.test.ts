@@ -40,6 +40,16 @@ describe('buildRuntime (composition root)', () => {
     }
   });
 
+  it('assembles no context for the offline scaffolder (avoids loading index/WASM)', async () => {
+    const runtime = await buildRuntime(await repo());
+    try {
+      expect(runtime.llmPlanning).toBe(false);
+      expect(await runtime.context(task)).toBe('');
+    } finally {
+      runtime.close();
+    }
+  });
+
   it('activates the LLM planner when a provider is configured and its key is present', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     const runtime = await buildRuntime(

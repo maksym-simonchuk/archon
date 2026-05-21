@@ -57,7 +57,8 @@ async function runPlan(goal: string): Promise<void> {
   const runtime = await buildRuntime(process.cwd());
   try {
     console.log(plannerLabel(runtime.llmPlanning));
-    printPlan(await runtime.planner().plan(makeTask(goal, runtime.config.profile)));
+    const task = makeTask(goal, runtime.config.profile);
+    printPlan(await runtime.planner().plan(task, await runtime.context(task)));
   } finally {
     runtime.close();
   }
@@ -68,7 +69,8 @@ async function runRun(goal: string): Promise<void> {
   const runtime = await buildRuntime(process.cwd());
   try {
     console.log(plannerLabel(runtime.llmPlanning));
-    printResults(await runtime.loop().run(makeTask(goal, 'trusted')));
+    const task = makeTask(goal, 'trusted');
+    printResults(await runtime.loop().run(task, await runtime.context(task)));
   } finally {
     runtime.close();
   }

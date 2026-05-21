@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CognitionLoop } from './cognition/loop';
@@ -9,7 +10,7 @@ import { ScaffoldStrategy } from './cognition/scaffold-strategy';
 import type { PlanStrategy } from './cognition/types';
 import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
-import type { MemoryTier, Profile } from './core/types';
+import type { MemoryTier, Profile, Task } from './core/types';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
@@ -17,6 +18,7 @@ import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
 import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
+import { ContextService } from './sensing/context-service';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph } from './sensing/symbol-graph';
@@ -52,6 +54,8 @@ export interface Runtime {
   readonly llmPlanning: boolean;
   /** Planner using the chosen strategy (ProviderPlanner, else ScaffoldStrategy). */
   planner(): Planner;
+  /** Assemble the budgeted repo-map context for a task (empty for the offline planner). */
+  context(task: Task): Promise<string>;
   /** Broker rooted at `cwd`; profile defaults to the config profile. */
   brokerAt(cwd: string, profile?: Profile): CapabilityBroker;
   /** The shared (lazily-opened) memory store. */
@@ -106,6 +110,25 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const planner = (): Planner => new Planner(strategy);
 
+  const context = async (task: Task): Promise<string> => {
+    // The deterministic scaffolder ignores context, so don't pay to load the
+    // index + WASM ranking for it. With no index yet, there is no repo-map —
+    // returning '' also keeps a dry-run `plan` writeless (no db is opened).
+    if (!llmPlanning) return '';
+    const indexPath = join(root, config.paths.index);
+    if (!existsSync(indexPath)) return '';
+    const store = new IndexStore(indexPath);
+    try {
+      const assembled = await new ContextService(await computeCore(), store).assemble(
+        task,
+        config.budgets.contextTokensMax,
+      );
+      return assembled.text;
+    } finally {
+      store.close();
+    }
+  };
+
   const loop = (): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
@@ -143,6 +166,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     router,
     llmPlanning,
     planner,
+    context,
     brokerAt,
     memory,
     journal,
