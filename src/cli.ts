@@ -1,27 +1,13 @@
 #!/usr/bin/env node
-// Archon CLI — command surface for the MVP. `plan` and `run` are live (M6);
-// `index`/`status` remain tracked stubs (see docs/ROADMAP.md).
+// Archon CLI — command surface for the MVP. All four commands are live:
+// `index` (M1), `plan`/`run` (M6), `status` (M0). Every command is composed
+// through the single runtime root (`buildRuntime`).
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { CognitionLoop } from './cognition/loop';
-import { Executor } from './cognition/executor';
-import { Planner } from './cognition/planner';
-import { Reflector } from './cognition/reflector';
-import { ScaffoldStrategy } from './cognition/scaffold-strategy';
 import type { CognitivePlan } from './cognition/types';
-import { Verifier } from './cognition/verifier';
-import { loadComputeCore } from './core/compute';
 import type { Profile, StepResult, Task } from './core/types';
-import { AuditLog } from './effecting/audit-log';
-import { CapabilityBroker } from './effecting/capability-broker';
-import { loadPolicy, PolicyEngine } from './effecting/policy-engine';
-import { Transaction } from './effecting/transaction';
-import { MemoryStore } from './memory/store';
-import { Indexer } from './sensing/indexer';
-import { IndexStore } from './sensing/store';
-import { SymbolGraph } from './sensing/symbol-graph';
-import { loadConfig } from './services/config';
+import { buildRuntime } from './runtime';
 import { TaskJournal } from './services/task-journal';
 
 const HELP = `archon — constrained AI staff-engineer runtime (MVP)
@@ -41,6 +27,9 @@ const makeTask = (goal: string, profile: Profile): Task => ({
   profile,
   createdAt: new Date().toISOString(),
 });
+
+const plannerLabel = (llm: boolean): string =>
+  `planner: ${llm ? 'llm (provider-router)' : 'deterministic (scaffold)'}`;
 
 function printPlan(cog: CognitivePlan): void {
   console.log(`plan ${cog.plan.taskId}: ${cog.plan.rationale}`);
@@ -65,48 +54,51 @@ function printResults(results: StepResult[]): void {
 
 async function runPlan(goal: string): Promise<void> {
   if (!goal) return usageError('plan <goal>');
-  const cog = await new Planner(new ScaffoldStrategy()).plan(makeTask(goal, 'safe'));
-  printPlan(cog);
+  const runtime = await buildRuntime(process.cwd());
+  try {
+    console.log(plannerLabel(runtime.llmPlanning));
+    printPlan(await runtime.planner().plan(makeTask(goal, runtime.config.profile)));
+  } finally {
+    runtime.close();
+  }
 }
 
 async function runRun(goal: string): Promise<void> {
   if (!goal) return usageError('run <goal>');
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const doc = loadPolicy(readFileSync(join(root, config.paths.policy), 'utf8'));
-  const audit = new AuditLog();
-  // `trusted` so the worktree transaction's git ops are permitted; the broker
-  // still gates each one, and writes are confined to the worktree.
-  const brokerAt = (cwd: string): CapabilityBroker =>
-    new CapabilityBroker(new PolicyEngine(doc, 'trusted'), audit, cwd);
-  const memory = new MemoryStore(join(root, config.paths.memory));
-  const journal = new TaskJournal(join(root, config.paths.journal));
-
-  const loop = new CognitionLoop({
-    planner: new Planner(new ScaffoldStrategy()),
-    transaction: new Transaction(brokerAt(root), root, join(root, '.archon/worktrees')),
-    reflector: new Reflector(memory),
-    journal,
-    executorFor: (worktree, taskId) => new Executor(brokerAt(worktree), taskId),
-    verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
-  });
-
+  const runtime = await buildRuntime(process.cwd());
   try {
-    printResults(await loop.run(makeTask(goal, 'trusted')));
+    console.log(plannerLabel(runtime.llmPlanning));
+    printResults(await runtime.loop().run(makeTask(goal, 'trusted')));
   } finally {
-    memory.close();
-    journal.close();
+    runtime.close();
+  }
+}
+
+async function runIndex(): Promise<void> {
+  const runtime = await buildRuntime(process.cwd());
+  const { indexer, store, close } = await runtime.indexer();
+  try {
+    const dirty = await indexer.dirtyPaths();
+    await indexer.reindex(dirty);
+    console.log(
+      `indexed ${dirty.length} changed path(s) → ${store.allSymbols().length} symbols across ${store.allFileHashes().length} file(s)`,
+    );
+  } finally {
+    close();
+    runtime.close();
   }
 }
 
 async function runStatus(): Promise<void> {
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const b = config.budgets;
-  console.log(`profile: ${config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`);
+  const runtime = await buildRuntime(process.cwd());
+  const b = runtime.config.budgets;
+  console.log(
+    `profile: ${runtime.config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`,
+  );
 
-  // Open read-only intent: don't create the db just to report an empty journal.
-  const journalPath = join(root, config.paths.journal);
+  // Read-only intent: don't create the db just to report an empty journal, so
+  // open the real path only when it already exists (else an ephemeral one).
+  const journalPath = join(runtime.root, runtime.config.paths.journal);
   const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
   try {
     const recent = journal.recent(15);
@@ -118,23 +110,7 @@ async function runStatus(): Promise<void> {
     for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}`);
   } finally {
     journal.close();
-  }
-}
-
-async function runIndex(): Promise<void> {
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const core = await loadComputeCore();
-  const store = new IndexStore(join(root, config.paths.index));
-  try {
-    const indexer = new Indexer(core, store, new SymbolGraph(store), root);
-    const dirty = await indexer.dirtyPaths();
-    await indexer.reindex(dirty);
-    console.log(
-      `indexed ${dirty.length} changed path(s) → ${store.allSymbols().length} symbols across ${store.allFileHashes().length} file(s)`,
-    );
-  } finally {
-    store.close();
+    runtime.close();
   }
 }
 
