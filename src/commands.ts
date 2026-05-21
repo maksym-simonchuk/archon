@@ -142,3 +142,27 @@ export async function cmdPromote(rt: Runtime, id: string): Promise<void> {
       : `memory: "${id}" is not promotable (unknown id or already at the top tier)`,
   );
 }
+
+/**
+ * List plugins loaded from `.archon/plugins/`, previewing each declared
+ * capability against the active policy. The same gate runs at invoke time, so a
+ * `⚠` plugin (any capability not `allow`ed) won't run cleanly under this profile.
+ */
+export async function cmdPlugins(rt: Runtime): Promise<void> {
+  const plugins = (await rt.pluginHost()).list();
+  if (plugins.length === 0) {
+    console.log('plugins: none loaded — drop one at .archon/plugins/<name>/plugin.mjs');
+    return;
+  }
+  const engine = rt.policy();
+  console.log(`plugins: ${plugins.length} loaded (profile: ${rt.config.profile}):`);
+  for (const { manifest } of plugins) {
+    const decisions = manifest.capabilities.map((action) => ({
+      action,
+      decision: engine.evaluate({ action, target: `plugin:${manifest.name}`, reason: 'capability preview' }).decision,
+    }));
+    const runnable = decisions.every((d) => d.decision === 'allow');
+    const caps = decisions.length ? decisions.map((d) => `${d.action}=${d.decision}`).join(', ') : '(no capabilities)';
+    console.log(`  ${runnable ? '✓' : '⚠'} ${manifest.name}@${manifest.version}  [${manifest.kind}]  ${caps}`);
+  }
+}

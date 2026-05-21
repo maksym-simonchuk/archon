@@ -3,6 +3,7 @@ import {
   cmdIndex,
   cmdMemory,
   cmdPlan,
+  cmdPlugins,
   cmdPromote,
   cmdPromotions,
   cmdRun,
@@ -20,6 +21,7 @@ const SHELL_HELP = `commands:
   /status          task journal + budgets
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
+  /plugins         list loaded plugins + capability previews
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
   <text>           shorthand for /plan <text>`;
@@ -66,6 +68,9 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
     case '/promote':
       if (arg) await cmdPromote(rt, arg);
       else console.log('usage: /promote <id>');
+      return true;
+    case '/plugins':
+      await cmdPlugins(rt);
       return true;
     default:
       if (head.startsWith('/')) {

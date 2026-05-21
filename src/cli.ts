@@ -4,7 +4,7 @@
 // composes through the single runtime root (buildRuntime); the shared command
 // implementations live in src/commands.ts (reused by the shell).
 
-import { cmdIndex, cmdMemory, cmdPlan, cmdPromote, cmdPromotions, cmdRun, cmdStatus } from './commands';
+import { cmdIndex, cmdMemory, cmdPlan, cmdPlugins, cmdPromote, cmdPromotions, cmdRun, cmdStatus } from './commands';
 import { cmdInit } from './init';
 import { buildRuntime, type Runtime } from './runtime';
 import { startShell } from './shell';
@@ -20,6 +20,7 @@ Usage:
   archon status           Show task journal + budgets                   (M0)
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
+  archon plugins          List loaded plugins + capability previews     (M7)
   archon --help           Show this help
 
 See docs/ROADMAP.md and AGENTS.md.`;
@@ -61,6 +62,8 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdRun(rt, goal));
     case 'status':
       return withRuntime(cmdStatus);
+    case 'plugins':
+      return withRuntime(cmdPlugins);
     case 'memory': {
       const [sub, ...more] = rest;
       if (sub === 'promote') {

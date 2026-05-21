@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { CognitionLoop } from './cognition/loop';
 import { Executor } from './cognition/executor';
 import { Planner } from './cognition/planner';
@@ -25,6 +25,7 @@ import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
 import { AnthropicClient } from './services/providers/anthropic';
 import { resolveModels } from './services/model-catalog';
+import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 import { TaskJournal } from './services/task-journal';
 
@@ -68,6 +69,10 @@ export interface Runtime {
   retriever(tier: MemoryTier, key: string): Promise<RetrieverPlugin>;
   /** An incremental indexer plus its index store (caller closes the returned store). */
   indexer(): Promise<{ indexer: Indexer; store: IndexStore; close(): void }>;
+  /** The live plugin host: external plugins from `.archon/plugins/` loaded once (memoized). */
+  pluginHost(): Promise<PluginHost>;
+  /** A PolicyEngine for `profile` (defaults to the config profile) — pure capability previews, no audit. */
+  policy(profile?: Profile): PolicyEngine;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -104,6 +109,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   let memoryStore: MemoryStore | undefined;
   let journalStore: TaskJournal | undefined;
   let core: ComputeCore | undefined;
+  let host: Promise<PluginHost> | undefined;
   const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory)));
   const journal = (): TaskJournal => (journalStore ??= new TaskJournal(join(root, config.paths.journal)));
   const computeCore = async (): Promise<ComputeCore> => (core ??= await loadComputeCore());
@@ -171,6 +177,18 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     };
   };
 
+  // Build the host once and load `.archon/plugins/<name>/plugin.mjs` (sibling of
+  // the policy file). The dynamic import is host bootstrapping; loaded plugins
+  // still receive no authority beyond what the broker grants at call time.
+  const pluginHost = (): Promise<PluginHost> =>
+    (host ??= (async () => {
+      const h = new PluginHost(brokerAt(root));
+      await h.load(join(root, dirname(config.paths.policy), 'plugins'));
+      return h;
+    })());
+
+  const policy = (profile: Profile = config.profile): PolicyEngine => new PolicyEngine(policyDoc, profile);
+
   const close = (): void => {
     memoryStore?.close();
     journalStore?.close();
@@ -189,6 +207,8 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     loop,
     retriever,
     indexer,
+    pluginHost,
+    policy,
     close,
   };
 }
