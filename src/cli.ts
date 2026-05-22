@@ -97,9 +97,7 @@ async function main(argv: string[]): Promise<void> {
     case 'doctor':
       return withRuntime((rt) => cmdDoctor(rt, { json }));
     case 'model':
-      return withRuntime(async (rt) => {
-        cmdModel(rt);
-      });
+      return withRuntime((rt) => cmdModel(rt));
     case 'plugins':
       return withRuntime(cmdPlugins);
     case 'tool': {

@@ -161,7 +161,7 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       cmdCost(rt);
       return true;
     case '/model':
-      cmdModel(rt);
+      await cmdModel(rt);
       return true;
     case '/doctor':
       await cmdDoctor(rt);

@@ -111,6 +111,10 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     routing: config.routing,
     fallback: config.routing.fallback,
     budgetUsd: config.budgets.perTaskUsd,
+    // Lazy: the host (and its `.archon/plugins/` imports) load only if the
+    // router ever needs a fallback. `pluginHost` is defined below — the closure
+    // captures it and is never called before buildRuntime returns. See ADR-0012.
+    providerPlugins: async () => (await pluginHost()).providerPlugins(),
   });
 
   const llmPlanning = models.length > 0 && clients.length > 0;
