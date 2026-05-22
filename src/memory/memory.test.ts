@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { MemoryRecord } from '../core/types';
 import { PromotionEngine } from './promotion';
 import { MemoryStore } from './store';
+import { embedText } from './vector-index';
 
 const rec = (id: string, over: Partial<MemoryRecord> = {}): MemoryRecord => ({
   id,
@@ -28,6 +29,31 @@ describe('MemoryStore (M5)', () => {
     m.write(rec('pinned'), { pinned: true });
     expect(m.evict('episodic', 1)).toBe(1); // keep top 1 unpinned ⇒ drop 1
     expect(m.get('pinned')).toBeDefined();
+    m.close();
+  });
+
+  it('persists a content vector per record when an embedder is attached (M24)', () => {
+    const m = new MemoryStore(':memory:', embedText);
+    m.write(rec('a', { content: 'auth login refactor' }));
+    const vecs = m.recallVectors('episodic', 'auth');
+    expect(vecs).toHaveLength(1);
+    expect([...vecs[0].vector]).toEqual([...embedText('auth login refactor')]);
+    m.close();
+  });
+
+  it('drops a record\'s persisted vector when it is evicted (index stays in step)', () => {
+    const m = new MemoryStore(':memory:', embedText);
+    m.write(rec('a', { content: 'one' }));
+    m.write(rec('b', { content: 'two' }));
+    m.evict('episodic', 1); // drop the lowest-value unpinned record
+    expect(m.recallVectors('episodic', 'auth')).toHaveLength(1);
+    m.close();
+  });
+
+  it('omits records that have no persisted vector (written without an embedder)', () => {
+    const m = new MemoryStore(':memory:'); // no embedder
+    m.write(rec('a'));
+    expect(m.recallVectors('episodic', 'auth')).toEqual([]);
     m.close();
   });
 });

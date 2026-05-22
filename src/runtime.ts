@@ -19,13 +19,15 @@ import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/polic
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
 import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
-import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
+import { embedText } from './memory/vector-index';
+import { createPersistedRetriever } from './plugins/builtin/persisted-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
 import { extractImports, resolveImport } from './sensing/import-resolver';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
+import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
 import { createAiClient } from './services/providers/ai-sdk';
@@ -162,7 +164,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   let journalStore: TaskJournal | undefined;
   let core: ComputeCore | undefined;
   let host: Promise<PluginHost> | undefined;
-  const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory)));
+  // The embedder persists a content vector with every memory write, so semantic
+  // recall ranks against the stored matrix instead of re-embedding each query (M24).
+  const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory), embedText));
   const journal = (): TaskJournal => (journalStore ??= new TaskJournal(join(root, config.paths.journal)));
   const computeCore = async (): Promise<ComputeCore> => (core ??= await loadComputeCore());
 
@@ -188,7 +192,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // (guarded on memory-db existence so a dry-run `plan` opens/creates nothing).
   const memoryContext = async (task: Task): Promise<string> => {
     if (!existsSync(join(root, config.paths.memory))) return '';
-    const retriever = createEmbeddingRetriever(await computeCore(), memory(), 'episodic', task.goal);
+    const retriever = createPersistedRetriever(await computeCore(), memory(), 'episodic', task.goal);
     const hits = await retriever.retrieve(task.goal, 3);
     return hits.length ? `# Relevant prior runs for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
   };
@@ -285,14 +289,14 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     });
 
   const retriever = async (tier: MemoryTier, key: string): Promise<RetrieverPlugin> => {
-    const plugin = createEmbeddingRetriever(await computeCore(), memory(), tier, key);
+    const plugin = createPersistedRetriever(await computeCore(), memory(), tier, key);
     return plugin;
   };
 
   const indexer = async (): Promise<{ indexer: Indexer; store: IndexStore; close(): void }> => {
     const store = new IndexStore(join(root, config.paths.index));
     return {
-      indexer: new Indexer(await computeCore(), store, new SymbolGraph(store), root),
+      indexer: new Indexer(await computeCore(), store, new SymbolGraph(store), root, parseTsSymbols),
       store,
       close: () => store.close(),
     };

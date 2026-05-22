@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Task } from './core/types';
 import { MemoryStore } from './memory/store';
+import { embedText } from './memory/vector-index';
 import { buildRuntime } from './runtime';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
@@ -67,7 +68,9 @@ describe('buildRuntime (composition root)', () => {
   it('folds prior-run memory into the LLM context via the bundled retriever', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });
-    const mem = new MemoryStore(join(root, '.archon/memory.db'));
+    // Seed exactly as the runtime now writes — with the embedder — so the
+    // persisted-vector retriever (M24) finds a stored vector to rank against.
+    const mem = new MemoryStore(join(root, '.archon/memory.db'), embedText);
     mem.write({
       id: 'episode:prev',
       tier: 'episodic',

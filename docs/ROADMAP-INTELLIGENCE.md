@@ -165,10 +165,12 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Deps: M7. Exit: a large-ingestion task routes to Gemini, a background scan to a local model, with fallback.
 - Done: `@ai-sdk/google` added; `createAiClient` now covers `anthropic | openai | google | local` — Gemini via the Google generative-language endpoint, `local` reusing the OpenAI chat protocol against a configurable base URL (`ARCHON_LOCAL_BASE_URL`, default `http://localhost:11434/v1`, keyless). Catalog gains `gemini-2.0-flash` (1M ctx) + `gemini-1.5-pro` (2M ctx); `local` model ids are user-named and synthesized free (cost 0). Runtime `PROVIDER_ENV`/`KEYLESS_PROVIDERS`/`providerStatus` updated; the router's existing strength-scored selection + budget breaker + fallback chain now spans all four. Tests inject `fetch` — no real network (Gemini-endpoint + local-baseURL routing asserted; `resolveModels` catalog + local-synthesis covered).
 
-#### M24 — Rust core: tree-sitter + vector store ⬜
+#### M24 — Accurate parsing + persisted vector store ✅
 - Goal: production-grade parsing + semantic memory.
 - Build: replace the heuristic symbol extractor with tree-sitter (or ts-morph for TS) for accurate symbol/dependency graphs; persist a vector index for semantic memory/retrieval.
 - Deps: M1. Exit: symbol graph matches a tree-sitter parse; semantic recall uses the persisted vector index.
+- Done (parsing): TS/JS now parse through `src/sensing/ts-parser.ts` (ts-morph / TypeScript compiler API) rather than the Rust regex heuristic — declarations are found structurally (functions, classes + methods, interfaces, type aliases, enums, arrow-const bindings) and `calls` edges connect real call sites to the *nearest enclosing* declaration, eliminating the heuristic's false positives (keywords, string contents) and misses (methods). tree-sitter stays unusable in wasm32 (ADR-0011), so the accurate parser lives host-side; the Indexer takes it as an injected `parseTs` and falls back to the Rust core for non-TS languages. One-hop graph (defines/calls/imports) is unchanged in shape, so blast-radius/neighbors/hotNodes all consume it as-is.
+- Done (vectors): `src/memory/vector-index.ts` adds a deterministic, L2-normalized hashing-trick embedding (FNV-1a, same family as the core's `embed_topk`, reimplemented in TS so persisted vectors don't depend on the WASM build). `MemoryStore` takes an optional embedder and persists a `memory_vectors(id, vec BLOB)` row on every write, drops it on eviction, and exposes `recallVectors`. The new `persisted-retriever` ranks a query against the *stored* matrix via the core's `cosineTopK` — recall cost no longer scales with document length. Runtime wires the embedder into the shared store and swaps `memoryContext` + `retriever()` onto the persisted path. (`embedding-retriever` is retained as the re-embed-on-query ABI demo.)
 
 ---
 
@@ -183,7 +185,7 @@ Not all 17 milestones are needed to demonstrate the thesis. Suggested cut:
   + M13 → M14 → M17. Risk-scaled autonomy + preservation + intent-scoped context.
 - **Autonomy MVP** (proves "conservative evolution"): + M19 → M21. One real
   `safe-refactor` / `improve` flow end-to-end.
-- **Production**: M11, M15, M16, M18, M20, M22, M24 — depth, prediction,
+- **Production**: M11, M15, M16, M18, M20, M22 — depth, prediction,
   generated agents, daemon, full provider mesh, accurate parsing.
 
 ## 4. Critical path
