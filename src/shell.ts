@@ -35,6 +35,7 @@ import {
   cmdRun,
   cmdSh,
   cmdSimulate,
+  cmdSkill,
   cmdSkills,
   cmdStatus,
   cmdTool,
@@ -95,6 +96,7 @@ export const COMMANDS = [
   '/memory',
   '/promote',
   '/plugins',
+  '/skill',
   '/skills',
   '/sh',
   '/policy',
@@ -136,6 +138,7 @@ const SHELL_HELP = `commands:
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
+  /skill [run <name> [--pick N] [--force]]  executable multi-phase skills (analyze→simulate→validate→execute)
   /skills [name]   list skill playbooks · <name>: print one
   /sh <command>    run a command through the policy broker (gated; argv only)
   /policy [check <cmd>]  show the safety policy · check: dry-run a command
@@ -196,6 +199,7 @@ function argCandidates(head: string, words: string[]): string[] {
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
+  if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
   if ((head === '/preserve' || head === '/simulate') && words.length === 3)
@@ -371,6 +375,18 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       const n = pick !== undefined ? Number(pick) : undefined;
       if (n !== undefined && (!Number.isInteger(n) || n < 0)) console.log('usage: /refactor [--pick <n≥0>] [--force]');
       else await cmdRefactor(rt, { pick: n, force: r.includes('--force') });
+      return true;
+    }
+    case '/skill': {
+      if (rest[0] !== 'run') {
+        await cmdSkill(rt); // bare /skill (or anything but `run`) lists the built-ins
+        return true;
+      }
+      const { value: pick, rest: r } = extractFlag(rest.slice(1), '--pick');
+      const n = pick !== undefined ? Number(pick) : undefined;
+      const name = r.find((t) => t !== '--force');
+      if (n !== undefined && (!Number.isInteger(n) || n < 0)) console.log('usage: /skill run <name> [--pick <n≥0>] [--force]');
+      else await cmdSkill(rt, name, { pick: n, force: r.includes('--force') });
       return true;
     }
     case '/hooks':

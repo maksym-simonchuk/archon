@@ -20,8 +20,9 @@ import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile } from './sen
 import { assessPreservation, type ChangeKind, formatPreservation } from './cognition/preservation';
 import { type AgentSpec, formatAgents, generateAgents } from './cognition/agent-factory';
 import { agentBriefing, selectAgent } from './cognition/agent-runtime';
-import { formatImprovements, type ImprovementAction, proposeImprovements } from './cognition/improve';
-import { formatSimulation } from './cognition/simulation';
+import { formatImprovements, type Improvement, type ImprovementAction, proposeImprovements } from './cognition/improve';
+import { formatSimulation, type SimulationReport } from './cognition/simulation';
+import { type ExecutableSkill, formatSkillRun, type PhaseStep, runSkill } from './cognition/skill-runtime';
 import { assembleSimulation, fingerprintAndModel, philosophySignals } from './simulation-assembly';
 import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
 import { IndexStore } from './sensing/store';
@@ -1012,6 +1013,153 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   // would be a redundant second block — pass force to defer to the command gate.
   printResults(await rt.loop(run.agent, { force: true }).run(task, context));
   console.log(`  replay: archon status ${task.id}`);
+}
+
+// ── M19: executable, multi-phase skills ─────────────────────────────────────
+
+/** Mutable scratchpad threaded through a `safe-refactor` run's phases. */
+interface SafeRefactorState {
+  proposal?: Improvement;
+  target?: string;
+  agent?: AgentSpec;
+  sim?: SimulationReport | null;
+  goal?: string;
+}
+
+/**
+ * The `safe-refactor` built-in (M19): the conservative-evolution flow expressed
+ * as the standard analyze → simulate → validate → execute pipeline, sharing one
+ * scratchpad across phases. It composes the *same* primitives as `/refactor`
+ * (M21 proposals, M20 simulation, M14 preservation, M18 agents, the loop's
+ * worktree transaction) — the runtime only sequences and gates them. The loop's
+ * non-overridable forbidden-import / cycle pre-hooks still run inside `execute`,
+ * so a bad change is blocked before any write even on the `--force` path.
+ */
+function safeRefactor(rt: Runtime, opts: { pick?: number; force?: boolean }): ExecutableSkill {
+  const state: SafeRefactorState = {};
+
+  const analyze: PhaseStep = {
+    phase: 'analyze',
+    run: async () => {
+      const { store, close } = await rt.indexer();
+      try {
+        const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
+        const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+        const definedFiles = new Set(store.allSymbols().map((s) => s.file));
+        const protectedSubjects = protectedModules(model, files, definedFiles, philosophy);
+        const { proposals } = proposeImprovements({
+          violations: detectViolations(buildViolationInput(store)).violations,
+          protectedSubjects,
+        });
+        if (proposals.length === 0) return { status: 'failed', detail: 'nothing to refactor — architecture is clean (see `improve`)' };
+        const idx = opts.pick ?? 0;
+        const proposal = proposals[idx];
+        if (!proposal) return { status: 'failed', detail: `no proposal #${idx} — ${proposals.length} available (see \`improve\`)` };
+
+        const subjectModule = proposal.subject.split(/ ↔ | → /)[0];
+        const target = files.map((f) => f.path).find((p) => moduleOf(p) === subjectModule && isSourceFile(p));
+        if (target === undefined) return { status: 'failed', detail: `can't resolve a source file for "${proposal.subject}" — index may be stale` };
+
+        const agent = selectAgent(generateAgents(fingerprint, model, philosophy), `${proposal.action} ${proposal.subject} ${target}`);
+        if (!agent) return { status: 'failed', detail: 'no agent available to execute the change' };
+
+        state.proposal = proposal;
+        state.target = target;
+        state.agent = agent;
+        state.goal = `${proposal.recommendation} (target file: ${target})`;
+        return { status: 'ok', detail: `#${idx} ${proposal.action} ${proposal.subject} (ROI ${proposal.roi}) → ${target}` };
+      } finally {
+        close();
+      }
+    },
+  };
+
+  const simulate: PhaseStep = {
+    phase: 'simulate',
+    run: async () => {
+      if (!state.target || !state.proposal) return { status: 'skipped', detail: 'no target resolved' };
+      const { indexer, store, close } = await rt.indexer();
+      try {
+        const sim = await assembleSimulation(rt.root, indexer, store, state.target, CHANGE_BY_ACTION[state.proposal.action]);
+        state.sim = sim;
+        if (!sim) return { status: 'skipped', detail: `${state.target} is unindexed — no structure to predict against` };
+        const summary = `${sim.recommendation} · regression ${Math.round(sim.regression.probability * 100)}% · blast ${sim.propagation.files} file(s)`;
+        if (sim.recommendation === 'block') return { status: 'blocked', detail: `${summary} — ${sim.rationale[0] ?? 'preservation / never-modify zone'}` };
+        return { status: 'ok', detail: summary };
+      } finally {
+        close();
+      }
+    },
+  };
+
+  const validate: PhaseStep = {
+    phase: 'validate',
+    run: async () => {
+      if (state.sim?.recommendation === 'review' && !opts.force) {
+        return { status: 'blocked', detail: 'simulation recommends review — re-run `/skill run safe-refactor --force` to apply' };
+      }
+      return { status: 'ok', detail: 'gates clear — loop will still run forbidden-import / cycle / preservation pre-hooks before any write' };
+    },
+  };
+
+  const execute: PhaseStep = {
+    phase: 'execute',
+    run: async () => {
+      if (!state.agent || !state.goal) return { status: 'failed', detail: 'no validated change to execute' };
+      const task = makeTask(state.goal, 'trusted');
+      const context = `${agentBriefing(state.agent)}\n\n${await planContext(rt, task, state.goal)}`;
+      console.log(`  agent: ${state.agent.id} (${state.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)} · run ${task.id}`);
+      // `force` only defers the loop's *preservation* gate (already run in the
+      // simulate/validate phases); the structural forbidden-import / cycle blocks
+      // are non-overridable and still fire — blocking a bad change before write.
+      const results = await rt.loop(state.agent, { force: true }).run(task, context);
+      printResults(results);
+      const merged = results.length > 0 && results.every((r) => r.verdict.passed);
+      return merged
+        ? { status: 'ok', detail: `merged — replay: archon status ${task.id}` }
+        : { status: 'failed', detail: `verify failed — discarded (replay: archon status ${task.id})` };
+    },
+  };
+
+  return {
+    name: 'safe-refactor',
+    description: 'analyze → simulate → validate → execute the top conservative improvement, gated and reversible',
+    steps: [analyze, simulate, validate, execute],
+  };
+}
+
+/** Registry of built-in executable skills (name → description + builder). */
+const EXECUTABLE_SKILLS: Record<string, { description: string; build: (rt: Runtime, opts: { pick?: number; force?: boolean }) => ExecutableSkill }> = {
+  'safe-refactor': {
+    description: 'analyze → simulate → validate → execute the top conservative improvement, gated and reversible',
+    build: safeRefactor,
+  },
+};
+
+/**
+ * Run an executable, multi-phase skill (M19): `skill` lists the built-ins,
+ * `skill run <name>` executes its analyze → simulate → validate → execute
+ * pipeline, short-circuiting at the first gate that refuses. Each phase composes
+ * existing primitives behind the broker / loop — the skill only sequences them.
+ */
+export async function cmdSkill(rt: Runtime, name?: string, opts: { pick?: number; force?: boolean } = {}): Promise<void> {
+  if (!name) {
+    console.log('executable skills:');
+    for (const [n, s] of Object.entries(EXECUTABLE_SKILLS)) console.log(`  ${n} — ${s.description}`);
+    console.log('run one with: skill run <name> [--pick N] [--force]');
+    return;
+  }
+  const entry = EXECUTABLE_SKILLS[name];
+  if (!entry) {
+    console.log(`skill: unknown skill "${name}" — available: ${Object.keys(EXECUTABLE_SKILLS).join(', ')}`);
+    return;
+  }
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('skill: no index yet — run `archon index` first');
+    return;
+  }
+  console.log(formatSkillRun(await runSkill(entry.build(rt, opts))));
 }
 
 /**

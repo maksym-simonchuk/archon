@@ -163,6 +163,41 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/skill lists the built-in executable skills', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill')).toBe(true);
+      const out = text(log);
+      expect(out).toContain('executable skills:');
+      expect(out).toContain('safe-refactor');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/skill run reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill run safe-refactor')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/skill run rejects an unknown skill name', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill run nope')).toBe(true);
+      expect(text(log)).toContain('unknown skill');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/refactor reports no index before one is built', async () => {
     const rt = await runtime();
     const log = captured();
@@ -284,8 +319,8 @@ describe('shell conversational /ask', () => {
 describe('shell tab-completion', () => {
   it('completes a slash-command prefix to its matches', () => {
     expect(completeShell('/pl')).toEqual([['/plan', '/plugins'], '/pl']);
-    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skills', '/sh'], '/s']);
-    expect(completeShell('/sk')).toEqual([['/skills'], '/sk']);
+    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skill', '/skills', '/sh'], '/s']);
+    expect(completeShell('/sk')).toEqual([['/skill', '/skills'], '/sk']);
     expect(completeShell('/sh')).toEqual([['/sh'], '/sh']);
   });
 

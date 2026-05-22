@@ -205,6 +205,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/memory': 'records · graph · recall',
   '/promote': 'confirm a memory promotion',
   '/plugins': 'loaded plugins + capability previews',
+  '/skill': 'run executable multi-phase skills (analyze→simulate→validate→execute)',
   '/skills': 'skill playbooks',
   '/sh': 'run a command through the policy broker',
   '/policy': 'show the safety policy · check',
