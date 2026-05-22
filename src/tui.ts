@@ -3,6 +3,8 @@ import { basename, join } from 'node:path';
 import { format } from 'node:util';
 import { loadComputeCore } from './core/compute';
 import { buildRuntime } from './runtime';
+import { fenceLang, highlightTs, isTsLang } from './tui-syntax';
+import { renderMarkdownLine } from './tui-markdown';
 import {
   COMMANDS,
   dispatch,
@@ -177,7 +179,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/plan': 'plan a task — no writes',
   '/run': 'plan → act → verify in a worktree',
   '/ask': 'stream an answer (remembers turns; @path attaches a file)',
-  '/clear': 'forget the /ask conversation',
+  '/clear': 'clear the /ask context + wipe the screen',
   '/index': 'incrementally index changed files',
   '/watch': 'reindex changed files + refresh health',
   '/impact': 'blast radius of a change to a file',
@@ -275,8 +277,18 @@ export async function startTui(): Promise<void> {
   const transcript: string[] = [...BANNER];
   let pending = ''; // partial last line (mid-stream, no newline yet)
   let scrollOffset = 0; // 0 = pinned to bottom
+  let streamedChars = 0; // model output captured during the current `thinking…` turn
+  // Claude-Code-style turn markers: the first output line of every turn is tagged
+  // so it renders with a `⏺` glyph. `awaitingResponse` arms the next non-empty
+  // pushed line as that start; `responseStarts` keeps the marks for scrollback.
+  const responseStarts = new Set<number>();
+  let awaitingResponse = false;
 
   const pushTranscript = (line: string): void => {
+    if (awaitingResponse && line.trim() !== '') {
+      responseStarts.add(transcript.length);
+      awaitingResponse = false;
+    }
     transcript.push(line);
   };
   const capture = (text: string): void => {
@@ -284,6 +296,7 @@ export async function startTui(): Promise<void> {
     const parts = pending.split('\n');
     pending = parts.pop() ?? '';
     for (const p of parts) pushTranscript(p);
+    if (busy) streamedChars += text.length; // feeds the live token estimate in the status line
     scrollOffset = 0; // new output snaps the view to the bottom
     scheduleRender();
   };
@@ -326,6 +339,7 @@ export async function startTui(): Promise<void> {
   let draft = ''; // the live draft stashed while browsing history
   let busy = false;
   let busyLabel = 'working…';
+  let busyStart = 0; // ms timestamp the current command started (for elapsed time)
   let spinnerFrame = 0;
   let armedExit = false; // first ^C on an empty line arms exit; second exits
   let running = true;
@@ -380,10 +394,25 @@ export async function startTui(): Promise<void> {
   // The inner content of the framed input box (between the `│` borders), padded
   // to the exact inner width so the right border always aligns. `cursorCol` is
   // the absolute 1-based screen column, offset by 1 for the left border.
+  // Claude-Code-style activity line: spinner, verb, and the "all the info" tail —
+  // elapsed seconds, a live ≈token estimate while a model answer streams, and the
+  // interrupt hint. Tokens are approximated from streamed characters (≈4 chars/token).
+  const busyStatus = (): string => {
+    const secs = Math.max(0, Math.round((Date.now() - busyStart) / 1000));
+    const parts = [`${secs}s`];
+    if (busyLabel === 'thinking…' && streamedChars > 0) {
+      const tok = Math.round(streamedChars / 4);
+      parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
+    }
+    parts.push('^C to interrupt');
+    return parts.join(' · '); // plain separator: the caller wraps the whole tail in dim
+  };
+
   const inputContent = (cols: number): { content: string; cursorCol: number } => {
     const innerW = Math.max(0, cols - 2); // floors at 0 so the box never exceeds `cols`
     if (busy) {
-      return { content: padTo(clip(`${cyan(SPINNER[spinnerFrame])} ${dim(busyLabel)}`, innerW), innerW), cursorCol: -1 };
+      const line = `${cyan(SPINNER[spinnerFrame])} ${bold(busyLabel)} ${dim(`(${busyStatus()})`)}`;
+      return { content: padTo(clip(line, innerW), innerW), cursorCol: -1 };
     }
     const field = Math.max(1, innerW - PROMPT_W); // visible columns for the buffer itself
     const hscroll = input.cursor > field - 1 ? input.cursor - (field - 1) : 0;
@@ -479,10 +508,42 @@ export async function startTui(): Promise<void> {
       transcriptHeight = Math.max(1, rows - 5);
     }
 
-    // Transcript display lines (wrapped), then the visible tail.
+    // Transcript display lines (wrapped), then the visible tail. Lines inside a
+    // ``` fenced code block get TS/JS syntax highlighting (Claude-Code style);
+    // the fence markers render dim. Highlighting is colour-only — skipped under
+    // NO_COLOR — and runs on the logical line before wrapping.
     const logical = pending ? [...transcript, pending] : transcript;
     const wrapped: string[] = [];
-    for (const l of logical) for (const w of wrapLine(l, cols - 2)) wrapped.push(`  ${w}`);
+    let fenceOpen = false;
+    let fenceHighlight = false;
+    for (let idx = 0; idx < logical.length; idx++) {
+      const l = logical[idx];
+      let rendered: string;
+      const lang = useColor ? fenceLang(l) : undefined;
+      if (lang !== undefined) {
+        fenceOpen = !fenceOpen;
+        fenceHighlight = fenceOpen && isTsLang(lang);
+        rendered = dim(l); // the ``` fence marker itself renders dim
+      } else if (fenceOpen) {
+        // Inside a code fence: highlight TS/JS, leave other languages raw.
+        rendered = fenceHighlight ? highlightTs(l) : l;
+      } else {
+        // Prose: render the model's plain text as Markdown. renderMarkdownLine
+        // no-ops on ANSI-styled lines, so the user-echo, banner and pre-styled
+        // command output pass through untouched.
+        rendered = useColor ? renderMarkdownLine(l) : l;
+      }
+      // The first line of each turn's output carries a `⏺` marker (Claude-Code
+      // style). The 2-col marker replaces the 2-space indent, so wrapped
+      // continuation rows stay aligned under the text. `pending` (the streaming,
+      // not-yet-flushed line at index === transcript.length) is marked live.
+      const isStart =
+        responseStarts.has(idx) || (awaitingResponse && idx === transcript.length && l.trim() !== '');
+      const rows = wrapLine(rendered, cols - 2);
+      for (let r = 0; r < rows.length; r++) {
+        wrapped.push(`${isStart && r === 0 ? `${cyan('⏺')} ` : '  '}${rows[r]}`);
+      }
+    }
     const view = tailLines(wrapped, transcriptHeight, scrollOffset);
 
     const frame: string[] = [headerRow(cols)];
@@ -516,15 +577,19 @@ export async function startTui(): Promise<void> {
   };
 
   const submit = async (line: string): Promise<void> => {
+    awaitingResponse = false; // clear any leak from a previous no-output turn
     // Separate conversation turns with a blank line (but never lead with one).
     if (transcript.length > 0 && transcript[transcript.length - 1] !== '') pushTranscript('');
-    pushTranscript(`${cyan(bold('›'))} ${bold(line)}`);
+    pushTranscript(`${cyan('>')} ${line}`); // Claude-Code-style user-message echo
     recordHistory(line);
     input = { buffer: '', cursor: 0 };
     histIndex = -1;
     menuSel = 0;
     busy = true;
     busyLabel = line.startsWith('/ask') || !line.startsWith('/') ? 'thinking…' : 'working…';
+    busyStart = Date.now();
+    streamedChars = 0;
+    awaitingResponse = true; // the next captured output line begins this turn's response
     render();
     try {
       const cont = await dispatch(rt, line, session);
@@ -535,6 +600,16 @@ export async function startTui(): Promise<void> {
       if (pending) {
         pushTranscript(pending);
         pending = '';
+      }
+      // `/clear` should wipe the on-screen scrollback too, not just the /ask
+      // conversation context (dispatch already reset that). Match the user's
+      // "clear the chat" expectation: drop the transcript and unpin the scroll.
+      if (line.trim() === '/clear') {
+        transcript.length = 0;
+        scrollOffset = 0;
+        responseStarts.clear();
+        awaitingResponse = false;
+        pushTranscript(dim('context cleared'));
       }
       busy = false;
       render();
