@@ -36,6 +36,7 @@ import {
   cmdStatus,
   cmdTool,
   cmdViolations,
+  cmdWatch,
   extractFlag,
 } from './commands';
 import type { ChangeKind } from './cognition/preservation';
@@ -53,8 +54,10 @@ export interface ShellSession {
   askHistory: AskTurn[];
   /** Controller for an in-flight /ask, if any — Ctrl-C aborts it (see `startShell`). */
   abort?: AbortController;
+  /** Dirty-set snapshot threaded across `/watch` ticks (M22) so each tick reports a delta. */
+  watchDirty: ReadonlySet<string>;
 }
-export const newSession = (): ShellSession => ({ askHistory: [] });
+export const newSession = (): ShellSession => ({ askHistory: [], watchDirty: new Set() });
 
 /** Every slash command the shell understands — drives tab-completion (and the TUI slash menu). */
 export const COMMANDS = [
@@ -63,6 +66,7 @@ export const COMMANDS = [
   '/ask',
   '/clear',
   '/index',
+  '/watch',
   '/impact',
   '/explain',
   '/map',
@@ -100,6 +104,7 @@ const SHELL_HELP = `commands:
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
+  /watch [--loop|--stop]  reindex changed files + refresh health · --loop polls in the background
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
@@ -180,6 +185,7 @@ function argCandidates(head: string, words: string[]): string[] {
     if (words.length === 3 && words[1] === 'list')
       return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
   }
+  if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
   if ((head === '/preserve' || head === '/simulate') && words.length === 3)
@@ -293,6 +299,12 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     case '/index':
       await cmdIndex(rt);
+      return true;
+    case '/watch':
+      // Single incremental tick (reindex changed subtree + refresh health). The
+      // continuous `--loop` poller is a REPL affordance handled in startShell;
+      // here a bare /watch (or a stray flag) runs one tick and threads the dirty set.
+      session.watchDirty = await cmdWatch(rt, session.watchDirty);
       return true;
     case '/impact':
       if (arg) await cmdImpact(rt, arg);
@@ -450,6 +462,44 @@ export async function startShell(): Promise<void> {
   // suggestion over command output. The keypress handler fires AFTER readline's
   // own (we register later), so rl.line/rl.cursor are already updated.
   let busy = false;
+
+  // ── /watch background poller (M22 daemon, in-process) ──────────────────────
+  // A timer that incrementally reindexes the dirty subtree and refreshes health
+  // without re-running a command. Skips a tick while a command is mid-output
+  // (reuses `busy`), unref'd so it never keeps the process alive on its own, and
+  // redraws the prompt after each tick so background output doesn't strand it.
+  const WATCH_INTERVAL_MS = 2000;
+  let watchTimer: NodeJS.Timeout | undefined;
+  const startWatchLoop = (): void => {
+    if (watchTimer) {
+      console.log('watch: already running — /watch --stop to stop');
+      return;
+    }
+    console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s — /watch --stop to stop`);
+    watchTimer = setInterval(() => {
+      if (busy) return; // don't interleave a tick with a running command's output
+      busy = true;
+      void cmdWatch(rt, session.watchDirty)
+        .then((next) => {
+          session.watchDirty = next;
+        })
+        .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
+        .finally(() => {
+          busy = false;
+          rl.prompt(true); // redraw the prompt beneath any tick output
+        });
+    }, WATCH_INTERVAL_MS);
+    watchTimer.unref?.();
+  };
+  const stopWatchLoop = (): void => {
+    if (!watchTimer) {
+      console.log('watch: not running');
+      return;
+    }
+    clearInterval(watchTimer);
+    watchTimer = undefined;
+    console.log('watch: stopped');
+  };
   // Repaint the dimmed suggestion after the cursor, then move the cursor back to
   // its logical spot. readline clears to end-of-line on its next refresh, so the
   // ghost erases itself on the following keystroke — we only ever draw. Cosmetic:
@@ -496,6 +546,18 @@ export async function startShell(): Promise<void> {
   try {
     for await (const line of rl) {
       const input = line.trim();
+      // The continuous watcher is a REPL affordance (it owns a timer the pure
+      // dispatch table can't), so it's toggled here, before dispatch.
+      if (input === '/watch --loop') {
+        startWatchLoop();
+        frame();
+        continue;
+      }
+      if (input === '/watch --stop') {
+        stopWatchLoop();
+        frame();
+        continue;
+      }
       if (input) {
         busy = true; // suppress ghost-text painting while a command runs
         try {
@@ -509,6 +571,7 @@ export async function startShell(): Promise<void> {
       frame();
     }
   } finally {
+    if (watchTimer) stopWatchLoop();
     rl.close();
     rt.close();
     saveHistory(historyFile, history);

@@ -23,6 +23,7 @@ import { formatImprovements, proposeImprovements } from './cognition/improve';
 import { formatSimulation, simulateExecution } from './cognition/simulation';
 import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
 import { IndexStore } from './sensing/store';
+import { changedSince, formatWatchTick } from './sensing/watch';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
 
@@ -319,6 +320,31 @@ export async function cmdIndex(rt: Runtime): Promise<void> {
     console.log(
       `indexed ${dirty.length} changed path(s) → ${store.allSymbols().length} symbols across ${store.allFileHashes().length} file(s)`,
     );
+  } finally {
+    close();
+  }
+}
+
+/**
+ * One incremental watch tick (M22 daemon runtime). Reindexes the working tree's
+ * dirty set — hash-gated, so unchanged files are skipped and changed files are
+ * reparsed; never a full rescan (ADR-0005) — then, only when the dirty set moved
+ * since `prev`, recomputes the architecture-health score and prints a one-line
+ * delta. Returns the new dirty set so the caller (the TUI's background poller)
+ * can thread it into the next tick. A single tick is the testable unit; the
+ * `watch` daemon is just this on a timer. Read-only git/fs + sensing only.
+ */
+export async function cmdWatch(rt: Runtime, prev: ReadonlySet<string> = new Set()): Promise<ReadonlySet<string>> {
+  const { indexer, store, close } = await rt.indexer();
+  try {
+    const dirty = await indexer.dirtyPaths();
+    const delta = changedSince(prev, dirty);
+    await indexer.reindex(dirty); // hash-gated: reparses only files whose content changed
+    if (!delta.quiet) {
+      const { healthScore } = detectViolations(buildViolationInput(store));
+      console.log(formatWatchTick(delta, healthScore));
+    }
+    return delta.current;
   } finally {
     close();
   }

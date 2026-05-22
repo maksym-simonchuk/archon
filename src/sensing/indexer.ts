@@ -46,8 +46,12 @@ export class Indexer {
 
   /** Paths changed in the working tree (tracked edits + untracked files). */
   async dirtyPaths(): Promise<string[]> {
-    const status = await this.git.status();
-    return [...new Set(status.files.map((f) => f.path))];
+    try {
+      const status = await this.git.status();
+      return [...new Set(status.files.map((f) => f.path))];
+    } catch {
+      return []; // not a git repo (or git unavailable) — nothing to reindex, like commitHistory
+    }
   }
 
   /**

@@ -42,7 +42,7 @@ The spec asks for a *repository operating system*. What exists today is the
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
 `violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ⬜ ·
-`boundaries` ✅ · `watch` ⬜ · `agents` ✅ · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
+`boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
 `explain` 🟡(symbol≠architecture reasoning).
 
 ---
@@ -150,10 +150,12 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 
 ### Phase D — Infrastructure
 
-#### M22 — Daemon Runtime (`watch`) ⬜
+#### M22 — Daemon Runtime (`watch`) 🟡 (in-process poller shipped)
 - Goal: continuous intelligence without re-running commands.
 - Build: `archon watch` daemon — FS watcher → git-diff/AST-aware incremental re-index of only the affected graph segment; symbol-level cache; background low-cost analysis.
 - Deps: M8, M12. Exit: editing one file re-indexes only its subtree live; violations refresh in the background.
+- Shipped: pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand; `/watch --loop` starts an unref'd in-process background poller (2s) in the line shell that reindexes + refreshes health without re-running a command, `/watch --stop` ends it. `dirtyPaths` now degrades to `[]` outside a git repo, like `commitHistory`.
+- Deferred: a real FS-event watcher (vs git-status polling), AST-segment-level invalidation, and `--loop` inside the full-screen TUI render loop (the line shell carries the daemon for now; the TUI gets the single-tick `/watch`).
 
 #### M23 — Provider Orchestration completion ⬜
 - Goal: route each task to the provider that fits it.

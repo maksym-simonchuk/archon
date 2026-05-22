@@ -179,6 +179,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/ask': 'stream an answer (remembers turns; @path attaches a file)',
   '/clear': 'forget the /ask conversation',
   '/index': 'incrementally index changed files',
+  '/watch': 'reindex changed files + refresh health',
   '/impact': 'blast radius of a change to a file',
   '/explain': 'symbol definition + callers/callees',
   '/map': 'graph overview — most depended-on symbols',

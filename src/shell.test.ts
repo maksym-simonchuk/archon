@@ -120,6 +120,38 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/watch runs a tick without a git repo and stays quiet', async () => {
+    const rt = await runtime();
+    const log = captured();
+    const session = newSession();
+    try {
+      expect(await dispatch(rt, '/watch', session)).toBe(true);
+      expect(text(log)).toBe(''); // no dirty paths → quiet tick, nothing printed
+      expect(session.watchDirty.size).toBe(0);
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/watch reindexes the dirty subtree and reports health', async () => {
+    const { simpleGit } = await import('simple-git');
+    const rt = await runtime();
+    const git = simpleGit(rt.root);
+    await git.init();
+    await writeFile(join(rt.root, 'a.ts'), 'export const a = 1;\n');
+    const log = captured();
+    const session = newSession();
+    try {
+      expect(await dispatch(rt, '/watch', session)).toBe(true);
+      const out = text(log);
+      expect(out).toContain('watch:');
+      expect(out).toContain('health');
+      expect(session.watchDirty.has('a.ts')).toBe(true);
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/risk asks for a file when given none', async () => {
     const rt = await runtime();
     const log = captured();
@@ -212,6 +244,7 @@ describe('shell tab-completion', () => {
     expect(completeShell('/memory ')).toEqual([['/memory list', '/memory graph'], '/memory ']);
     expect(completeShell('/policy c')).toEqual([['/policy check'], '/policy c']);
     expect(completeShell('/decisions ')).toEqual([['/decisions propose'], '/decisions ']);
+    expect(completeShell('/watch ')).toEqual([['/watch --loop', '/watch --stop'], '/watch ']);
     expect(completeShell('/memory list ')[0]).toEqual([
       '/memory list episodic',
       '/memory list semantic',
