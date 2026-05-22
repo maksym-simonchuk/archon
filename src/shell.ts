@@ -9,6 +9,7 @@ import {
   cmdExplain,
   cmdImpact,
   cmdIndex,
+  cmdMap,
   cmdMemory,
   cmdModel,
   cmdPlan,
@@ -48,6 +49,7 @@ const COMMANDS = [
   '/index',
   '/impact',
   '/explain',
+  '/map',
   '/status',
   '/cost',
   '/model',
@@ -71,6 +73,7 @@ const SHELL_HELP = `commands:
   /index           incrementally index changed files
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
+  /map             graph overview — size + most depended-on symbols
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
@@ -182,6 +185,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/explain':
       if (arg) await cmdExplain(rt, arg);
       else console.log('usage: /explain <symbol>');
+      return true;
+    case '/map':
+      await cmdMap(rt);
       return true;
     case '/status':
       await cmdStatus(rt, { taskId: arg || undefined });

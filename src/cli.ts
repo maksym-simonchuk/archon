@@ -10,6 +10,7 @@ import {
   cmdExplain,
   cmdImpact,
   cmdIndex,
+  cmdMap,
   cmdMemory,
   cmdModel,
   cmdPlan,
@@ -34,6 +35,7 @@ Usage:
   archon index            Incrementally index changed files            (M1)
   archon impact <file>    Blast radius — what a change here affects     (M1)
   archon explain <symbol> Definition + direct callers/callees            (M1)
+  archon map              Graph overview — size + most depended-on        (M1)
   archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
@@ -89,6 +91,8 @@ async function main(argv: string[]): Promise<void> {
       if (!symbol) return usageError('explain <symbol>');
       return withRuntime((rt) => cmdExplain(rt, symbol));
     }
+    case 'map':
+      return withRuntime(cmdMap);
     case 'plan': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
       const g = r.filter((a) => a !== '--json').join(' ').trim();

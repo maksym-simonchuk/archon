@@ -379,6 +379,47 @@ export async function cmdExplain(rt: Runtime, query: string): Promise<void> {
   }
 }
 
+/**
+ * A structural overview of the indexed symbol graph: how big it is (files /
+ * symbols / edges, with an edge-kind breakdown) and which symbols are most
+ * depended-on — the load-bearing nodes worth knowing before a change, and the
+ * entry points for `explain` / `impact`. (Distinct from the planner's budgeted
+ * repo-map in `rt.context` — this reports the raw graph, not a prompt.) Read-only
+ * and WASM-free: opens the existing index directly and never creates it.
+ */
+export async function cmdMap(rt: Runtime): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('map: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const files = store.allFileHashes().length;
+    const symbols = store.allSymbols();
+    const edges = store.loadEdges();
+    if (symbols.length === 0) {
+      console.log(`map: ${files} file(s) indexed, but no symbols yet (run \`archon index\`)`);
+      return;
+    }
+    console.log(`repo map: ${files} file(s) · ${symbols.length} symbol(s) · ${edges.length} edge(s)`);
+    // Edge-kind breakdown — count whatever kinds the extractor actually emitted.
+    const byKind = new Map<string, number>();
+    for (const e of edges) byKind.set(e.kind, (byKind.get(e.kind) ?? 0) + 1);
+    const kinds = [...byKind.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`);
+    if (kinds.length > 0) console.log(`  edges: ${kinds.join(' · ')}`);
+    const hot = new SymbolGraph(store).hotNodes(10);
+    if (hot.length === 0) {
+      console.log('  most depended-on: (none — no dependency edges yet)');
+      return;
+    }
+    console.log('  most depended-on (distinct dependents):');
+    hot.forEach((h, i) => console.log(`    ${String(i + 1).padStart(2)}. ${h.name}  ←${h.dependents}`));
+  } finally {
+    store.close();
+  }
+}
+
 /** Machine-readable shape of `archon status --json` (a stable automation contract). */
 export interface StatusReport {
   profile: Profile;
