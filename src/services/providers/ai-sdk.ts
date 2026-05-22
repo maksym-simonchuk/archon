@@ -67,12 +67,15 @@ export function createAiClient(provider: AiProvider, apiKey: string, fetchImpl?:
       };
     },
 
-    completeStream(spec: ModelSpec, prompt: string, maxTokens: number) {
+    completeStream(spec: ModelSpec, prompt: string, maxTokens: number, signal?: AbortSignal) {
       const result = streamText({
         model: resolve(spec.id),
         prompt,
         maxOutputTokens: maxTokens,
         maxRetries: 0,
+        // The SDK aborts the underlying HTTP request when `signal` fires, so a
+        // Ctrl-C in `/ask` stops generation instead of just detaching the reader.
+        abortSignal: signal,
       });
       return {
         textStream: result.textStream,

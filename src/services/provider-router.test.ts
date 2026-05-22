@@ -111,6 +111,35 @@ describe('ProviderRouter (M7)', () => {
     await expect(router.streamComplete(req('summarize', 'p2'), () => {})).rejects.toThrow(/budget exhausted/);
   });
 
+  it('streamComplete stops on abort, returns the partial text, and charges nothing', async () => {
+    const controller = new AbortController();
+    // After the first chunk the stream observes the abort and stops yielding —
+    // modelling how the SDK's textStream halts once its abortSignal fires.
+    const aborting: ProviderClient = {
+      provider: 'a',
+      complete: () => Promise.reject(new Error('unused')),
+      completeObject: () => Promise.reject(new Error('unused')),
+      completeStream: (_m, _p, _mt, signal) => {
+        async function* gen(): AsyncGenerator<string> {
+          yield 'par';
+          controller.abort(); // user hits Ctrl-C mid-stream
+          if (signal?.aborted) return;
+          yield 'SHOULD-NOT-EMIT';
+        }
+        return { textStream: gen(), usage: Promise.resolve({ inputTokens: 1000, outputTokens: 1000 }) };
+      },
+    };
+    const router = new ProviderRouter([model('m', 'a', ['summarize'], 1)], [aborting]);
+    const chunks: string[] = [];
+    const out = await router.streamComplete(req('summarize', 'hi'), (c) => chunks.push(c), controller.signal);
+
+    expect(chunks).toEqual(['par']); // nothing after the abort reaches the callback
+    expect(out.text).toBe('par');
+    expect(out.aborted).toBe(true);
+    expect(out.costUsd).toBe(0); // a cancelled stream isn't billed
+    expect(router.spent).toBe(0); // …so the running total is untouched
+  });
+
   it('routingTable reports per-model readiness and the resolved per-task chain', () => {
     const router = new ProviderRouter(
       [model('cheap', 'a', ['plan', 'summarize'], 0.5), model('strong', 'b', ['reason', 'diff'], 4)],

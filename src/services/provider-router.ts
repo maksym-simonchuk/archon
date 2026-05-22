@@ -36,12 +36,14 @@ export interface ProviderClient {
   /**
    * Optional streaming text. Providers that implement it enable
    * `router.streamComplete` (the shell's `/ask`); `usage` resolves when the
-   * stream finishes, for cost accounting.
+   * stream finishes, for cost accounting. An optional `signal` lets the caller
+   * cancel an in-flight stream (Ctrl-C) — implementations should stop yielding.
    */
   completeStream?(
     model: ModelSpec,
     prompt: string,
     maxTokens: number,
+    signal?: AbortSignal,
   ): { textStream: AsyncIterable<string>; usage: Promise<{ inputTokens: number; outputTokens: number }> };
 }
 
@@ -163,27 +165,43 @@ export class ProviderRouter {
    * stream ends. Unlike `complete`, there is no mid-stream fallback — once a
    * model is chosen and the first token is emitted, we commit to it (budget is
    * still guarded up front). Powers the shell's `/ask`.
+   *
+   * Pass `signal` to make the stream cancellable (Ctrl-C). On abort we stop
+   * consuming, return the partial text with `aborted: true`, and charge
+   * nothing — a stream the user killed isn't billed, and the provider's `usage`
+   * promise may never resolve once aborted, so we don't await it.
    */
   async streamComplete(
     req: RouteRequest,
     onChunk: (text: string) => void,
-  ): Promise<{ modelId: string; text: string; costUsd: number }> {
+    signal?: AbortSignal,
+  ): Promise<{ modelId: string; text: string; costUsd: number; aborted: boolean }> {
     this.budgetGuard();
     for (const modelId of this.routeChain(req.taskClass)) {
       const model = this.models.get(modelId);
       const client = model && this.clients.get(model.provider);
       if (!model || !client?.completeStream) continue;
-      const { textStream, usage } = client.completeStream(model, req.prompt, req.maxTokens);
+      const { textStream, usage } = client.completeStream(model, req.prompt, req.maxTokens, signal);
       let text = '';
-      for await (const chunk of textStream) {
-        text += chunk;
-        onChunk(chunk);
+      let aborted = false;
+      try {
+        for await (const chunk of textStream) {
+          text += chunk;
+          onChunk(chunk);
+        }
+      } catch (e) {
+        if (signal?.aborted) aborted = true; // cancellation surfaced as a throw
+        else throw e; // a real provider error — let it propagate
       }
-      const { inputTokens, outputTokens } = await usage;
-      const costUsd =
-        (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
-      this.spentUsd += costUsd;
-      return { modelId, text, costUsd };
+      if (signal?.aborted) aborted = true; // or a cooperative stop with no throw
+      let costUsd = 0;
+      if (!aborted) {
+        const { inputTokens, outputTokens } = await usage;
+        costUsd =
+          (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
+        this.spentUsd += costUsd;
+      }
+      return { modelId, text, costUsd, aborted };
     }
     throw new Error(`[archon] no streaming model routes to task class "${req.taskClass}"`);
   }
