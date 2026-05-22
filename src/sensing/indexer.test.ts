@@ -58,6 +58,18 @@ describe('Indexer', () => {
     expect(store.getFileHash('foo.ts')).toBe('h:3');
   });
 
+  it('reindex records cross-file import edges for TS files', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-idx-'));
+    await writeFile(join(dir, 'a.ts'), "import { b } from './b';\nexport const a = 1;");
+    await writeFile(join(dir, 'b.ts'), 'export const b = 2;');
+
+    const store = new IndexStore(':memory:');
+    const indexer = new Indexer(fakeCore(), store, new SymbolGraph(store), dir);
+
+    await indexer.reindex(['a.ts', 'b.ts']);
+    expect(store.loadFileEdges()).toEqual([{ src: 'a.ts', dst: 'b.ts' }]);
+  });
+
   it('reindex drops the slice for a path that no longer exists', async () => {
     dir = await mkdtemp(join(tmpdir(), 'archon-idx-'));
     const file = join(dir, 'foo.ts');

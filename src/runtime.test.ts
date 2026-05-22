@@ -87,6 +87,36 @@ describe('buildRuntime (composition root)', () => {
     }
   });
 
+  it('recalls pinned ADRs whose text the goal names into the LLM context (M16→M17)', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });
+    const mem = new MemoryStore(join(root, '.archon/memory.db'));
+    mem.write(
+      {
+        id: 'adr:0007',
+        tier: 'semantic',
+        key: 'Auth via session tokens',
+        content: 'ADR-0007 [accepted] Auth via session tokens\nwhy: stateless edge',
+        createdAt: '2026-01-01T00:00:00Z',
+        confirmed: true,
+      },
+      { pinned: true },
+    );
+    mem.close();
+
+    const authTask: Task = { ...task, goal: 'change the auth flow' };
+    const runtime = await buildRuntime(root);
+    try {
+      const ctx = await runtime.context(authTask);
+      expect(ctx).toContain('Relevant decisions');
+      expect(ctx).toContain('ADR-0007 [accepted] Auth via session tokens');
+      // A goal that names nothing in the ADR pulls no decisions in.
+      expect(await runtime.context(task)).not.toContain('Relevant decisions');
+    } finally {
+      runtime.close();
+    }
+  });
+
   it('folds retriever-plugin hits into the LLM context', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });

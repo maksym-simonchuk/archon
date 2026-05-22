@@ -83,6 +83,50 @@ export interface RankedSymbol {
   score: number;
 }
 
+// ── Structural analysis (M8) ────────────────────────────────────────────────
+export type RepoLayout = 'monorepo' | 'single';
+export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun' | 'unknown';
+/** Inferred top-level organising principle of the source tree. */
+export type ArchitecturalStyle =
+  | 'layered'
+  | 'feature-sliced'
+  | 'modular-monolith'
+  | 'ddd'
+  | 'flat'
+  | 'unknown';
+
+/**
+ * Heuristic structural snapshot of a repository, produced by `archon init`'s deep
+ * scan (M8) and persisted to the index. Derived from manifest files + shallow
+ * directory topology only — no symbol graph (that depth is M9). `inputHash` keys
+ * the snapshot to its inputs so a re-run can skip an unchanged repo.
+ */
+export interface ArchitecturalFingerprint {
+  /** ISO timestamp of the scan that produced this snapshot. */
+  scannedAt: string;
+  /** sha256 over the detector inputs; identical hash ⇒ nothing to re-scan. */
+  inputHash: string;
+  layout: RepoLayout;
+  packageManager: PackageManager;
+  /** Workspace globs when `layout === 'monorepo'`, else empty. */
+  workspaces: string[];
+  /** Detected source languages (e.g. `typescript`, `rust`, `python`). */
+  languages: string[];
+  /** Build/bundler tooling (e.g. `tsc`, `vite`, `turbo`, `cargo`). */
+  buildSystem: string[];
+  /** CI providers (e.g. `github-actions`, `gitlab-ci`). */
+  ci: string[];
+  /** App/server frameworks from dependencies (e.g. `react`, `next`, `express`). */
+  frameworks: string[];
+  /** Test runners (e.g. `vitest`, `jest`, `node:test`). */
+  testRunners: string[];
+  /** Declared or conventional entry points (manifest fields + common src files). */
+  entryPoints: string[];
+  architecturalStyle: ArchitecturalStyle;
+  /** Top-level source subdirectories — the raw signal behind `architecturalStyle`. */
+  topDirectories: string[];
+}
+
 // ── Cognition ─────────────────────────────────────────────────────────────────
 export interface Task {
   id: string;

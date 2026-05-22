@@ -1,0 +1,185 @@
+# ROADMAP — Repository Intelligence (Archon v1)
+
+Status: planning. This is the **second half** of Archon — the layer that turns the
+M0–M7 *safety + cognition skeleton* (see [`ROADMAP.md`](ROADMAP.md)) into the
+**project-native engineering intelligence system** described in the spec: deep
+structural understanding, architecture preservation, violation governance, and
+constrained autonomous evolution.
+
+Same rules as M0–M7: implement per [`AGENTS.md`](../AGENTS.md) (design → minimal diff
+→ verify); one milestone ≈ one reviewable branch; fill stubs, don't rewrite working
+planes. Legend: ✅ done · 🟡 partial · ⬜ todo.
+
+---
+
+## 1. Where we are vs. the spec
+
+The spec asks for a *repository operating system*. What exists today is the
+**execution substrate** for one — not yet the intelligence on top.
+
+| Spec pillar | Today | Gap |
+| --- | --- | --- |
+| `ai init` deep structural analysis | 🟡 scaffolds policy/config only | No stack/monorepo/CI detection, no architectural fingerprint |
+| Architectural intelligence (boundaries, ownership, criticality) | ⬜ | Symbol graph exists; no domain/boundary model |
+| Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ⬜ | 3-tier memory store exists; nothing generates project intelligence |
+| Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
+| Agent Factory (project-native generated agents) | ⬜ | Agents are prompt personas; no generation pipeline |
+| Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | 🟡 skills = passive Markdown playbooks | Not executable, not multi-phase |
+| Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ⬜ | Plugin ABI has hook *slots*; no enforcement hooks shipped |
+| Preservation layer (intentional vs accidental complexity) | ⬜ | Philosophy is in AGENTS.md prose; no engine |
+| Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
+| Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
+| Risk engine (low/med/high/critical → autonomy scaling) | 🟡 blast-radius gate | No risk scoring, no test-regression probability |
+| Execution simulation (pre-apply impact prediction) | 🟡 worktree verify (post-hoc) | No pre-apply simulation |
+| Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
+| Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
+| Philosophy + economics + confidence layers | ⬜ | None |
+| Autonomous improvement (`ai improve`/`refactor`/migration plans) | ⬜ | `run` executes one trivial scaffold task |
+| Daemon runtime (`ai watch`, FS/AST watchers) | ⬜ | Incremental indexer exists; no daemon/watcher |
+| Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | 🟡 anthropic+openai | No Gemini, no local; routing exists |
+| Rust core: tree-sitter, real vector store | 🟡 heuristic parser + `cosine_topk` | tree-sitter deferred; no persisted vector index |
+
+**CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
+`memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
+`violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ⬜ · `refactor` ⬜ ·
+`boundaries` ✅ · `watch` ⬜ · `agents` ⬜ · `explain` 🟡(symbol≠architecture reasoning).
+
+---
+
+## 2. Milestone plan (M8 → M24)
+
+Continues the M0–M7 numbering. Each milestone names its **deps** so the build
+order is a DAG, not a straight line. Grouped into 4 phases.
+
+### Phase A — Repository Intelligence (the missing foundation)
+
+#### M8 — Structural Analyzer (`init` deep scan) ⬜
+- Goal: `archon init` performs real repository intelligence extraction, not just policy scaffolding.
+- Build: detect monorepo/polyrepo, package manager, build system, CI/CD, framework stack (frontend/backend/infra), test runner. Infer architectural style (layered / feature-sliced / modular-monolith / DDD), layering directions, entry points. Emit an **architectural fingerprint** persisted to the index DB.
+- Deps: M1 (indexer), M2 (repo-map). Exit: `init` on a real repo prints stack + style + fingerprint; re-run is incremental (no full rescan).
+
+#### M9 — Domain & Boundary Inference ✅
+- Goal: a living model of bounded contexts and module topology.
+- Build: cluster the symbol graph into modules; infer bounded contexts, module ownership, shared/core modules, coupling hotspots, unstable zones, circular-dependency seeds. New CLI `boundaries`.
+- Deps: M8, symbol-graph. Exit: `boundaries` lists contexts + coupling hotspots; identifies the top god-module candidates.
+- Done: M8.5 added cross-file `imports` edges (host-side resolver, `file_edges` table) as the substrate; `inferBoundaries` lifts them to a directory-module graph → fan-in/out, Martin instability, core/unstable roles, coupling hotspots, god-module candidates, SCC cycle seeds. `/boundaries` (`src/sensing/boundaries.ts`, `cmdBoundaries`).
+
+#### M10 — Project Memory Generation ✅
+- Goal: turn structural analysis into persistent, machine-readable project intelligence + the human-facing memory files.
+- Build: generate/refresh `CLAUDE.md`, `AGENTS.md`, `project-memory.md`, conventions, constraints from M8/M9; store a machine-readable intelligence layer in SQLite (module intelligence, criticality, summaries). Extend `memory` with a graph/intelligence view.
+- Deps: M8, M9, M5 (memory store). Exit: `init` produces project-native memory files; `memory --graph` renders the intelligence layer; regeneration is diff-aware (preserves human edits).
+- Done ("new file only" scope — CLAUDE.md/AGENTS.md left untouched, they are the human contract): `init` generates `.archon/project-memory.md` (`renderProjectMemory`, archon-owned banner) from the fingerprint + boundary model, diff-aware via an embedded `archon:hash` keyed on `inputHash`+model; persists the boundary model to the `module_intelligence` SQLite table; `memory graph` (`cmdMemoryGraph`) renders that layer back. `src/memory/project-memory.ts`.
+
+#### M11 — Convention & Philosophy Engine ⬜
+- Goal: infer the project's engineering culture so recommendations adapt to it.
+- Build: detect naming/layering conventions, typing strictness, abstraction tolerance, startup-vs-enterprise and speed-vs-stability bias. Persist as a philosophy profile feeding later recommendation gates.
+- Deps: M8. Exit: a philosophy profile is emitted and stored; conflicting recommendations are tagged against it.
+
+### Phase B — Health & Governance
+
+#### M12 — Violation Intelligence ✅
+- Goal: continuous repository health with severity + impact, not just detection.
+- Build: detect boundary leaks, dependency violations, circular deps, dead code, duplicated logic, god modules, invalid layering, over-coupling, missing tests, inconsistent patterns; score each by severity × business impact (uses M9 criticality). New CLI `violations`; upgrade `doctor` into an architecture-health report.
+- Deps: M9. Exit: `violations` ranks findings by impact; `doctor` reports health score, not just readiness.
+- Done: `detectViolations` (`src/sensing/violations.ts`) emits the high-confidence detectors the substrate supports — circular deps (high), god modules (med), stable-dependency-principle violations (med), missing tests (low) — each scored severity × (1 + module criticality/fanIn) and ranked. `healthScore` = 100 − weighted penalties. `/violations` (`cmdViolations`) lists them; `doctor` now carries a `health` block (score + severity counts). Deferred (need signals not yet indexed): dead code, duplication, layering, inconsistent patterns.
+
+#### M13 — Risk + Confidence + Invariants Engine 🟡 (read-only slice)
+- Goal: governance primitives that scale autonomy to safety.
+- Build: classify code regions (stable / evolving / experimental / deprecated) and NEVER-MODIFY zones (auth, payments, public APIs, infra). Per-module **confidence score**. **Risk scoring** (low/med/high/critical) from blast radius + criticality + confidence + test-regression probability. Wire into the Policy Engine so autonomy/approval scale with risk.
+- Deps: M9, M12. Exit: a write into a critical/low-confidence region escalates to `ask`; risk level is attached to every planned step.
+- Done (advisory slice — Policy Engine deliberately UNTOUCHED, pending its own review): `scoreRisk` (`src/cognition/risk.ts`) → low/med/high/critical from blast radius + module criticality (fan-in) + confidence (test-coverage ratio, `moduleConfidence`) + never-modify zones; coarse region from module role. `/risk <file>` (`cmdRisk`) shows level + rationale.
+- Deferred: wiring risk into the Policy Engine gate (escalate critical-region writes to `ask`) and attaching risk to every planned step — these change the safety path and are a separate milestone.
+
+#### M14 — Preservation Layer ⬜
+- Goal: distinguish intentional from accidental complexity; protect project identity.
+- Build: classifier for intentional complexity vs tech debt and business-critical vs unnecessary abstraction (uses M11 philosophy + M9 criticality + M16 decisions when present). Gate that blocks "generic best-practice" rewrites of intentional structures.
+- Deps: M11, M13. Exit: a proposed refactor of an intentional abstraction is blocked with a stated reason; accidental complexity is still flagged.
+
+#### M15 — Temporal Evolution ✅
+- Goal: model the repository over time and predict architectural risk.
+- Build: time-series over git history + journal — architecture drift, coupling growth, complexity trajectory, tech-debt accumulation, module stability over time. Surface trends + risk forecast in `doctor`.
+- Deps: M12. Exit: `doctor` shows drift/coupling trend lines; flags modules trending toward god-object status.
+- Shipped: pure `analyzeEvolution(commits, model)` (`src/sensing/evolution.ts`) ranks modules by **churn × coupling** from `git log --name-only` and flags entangled-both-ways modules under heavy churn as god-object-trending (pre-threshold). `health_history` snapshot table (`store.ts`, appended by `init` only when the fingerprint `inputHash` changes) gives the health trend line. `doctor` surfaces both (trend ▲/▼ over last 2 scans + god-trending count); full report via the new `/evolution` command. Read-only git + no new deps; journal time-series deferred (git churn carries the M15 exit signal).
+
+#### M16 — Decision Intelligence (ADR-native) ✅
+- Goal: capture *why* decisions exist and keep them current.
+- Build: auto-generate ADR snapshots after major changes; decision memory (why / tradeoffs / what was rejected / constraints). Recall feeds the Context Compiler and Preservation Layer.
+- Deps: M10, M15. Exit: a significant merged change proposes an ADR snapshot; decision memory is queryable.
+- Shipped: pure `src/memory/decisions.ts` — `parseAdr` (id/title/status/date + Context/Decision/Consequences/Alternatives sections), `matchesQuery`, `decisionContent` (why/tradeoffs/rejected), `assessSignificance(commit, model)` (flags a change touching a core/god module or broad in files/modules, criticality from the M9 model), `proposeAdr` (drafts a **`proposed`-status** ADR — never files it; the proposed→accepted gate stays human, per ADR-0008). `init` ingests `docs/adr/NNNN-*.md` into the **semantic memory tier as pinned/confirmed** records (queryable via `memory list semantic`/recall; ready for the M17 Context Compiler). `/decisions [query|propose]` (`cmdDecisions`): list/substring-query decision memory · `propose` drafts an ADR for the latest significant commit. Read-only; no new deps.
+- Deferred: a git merge-hook to auto-trigger `propose` on merge (the proposal logic is wired; the trigger is operator-invoked for now).
+
+### Phase C — Autonomy (constrained, conservative)
+
+#### M17 — Context Compiler v2 ✅
+- Goal: intent-aware, minimal, intelligent context packets — never the whole repo.
+- Build: decompose task intent → resolve bounded-context scope (M9), related symbols, dependency neighborhood, historical decisions (M16), architecture rules, risk profile (M13), test-coverage relevance, change-impact surface. Upgrade `ContextService`.
+- Deps: M9, M13, M16. Exit: context for a task is scoped to its bounded context + impact surface and stays within budget with provenance.
+- Shipped: pure `src/sensing/context-scope.ts` — `decomposeIntent` (goal → distinct ≥3-char non-stopword terms), `resolveScope` (seed symbols by name/file match → seed modules (M9 `moduleOf`) → import-neighbor lift via M8.5 `file_edges` → in-scope working set). `ContextService` upgraded: assembles an **intent-scoped** packet (bounded context + the seeds' blast-radius **impact surface** via `SymbolGraph`), renders in-scope symbols first (tagged `*`) then backfills by global PageRank within budget, and returns a `scope` provenance field (bounded context, matched terms, impact-surface count). Header `# Context for: …` (scoped) vs `# Repo map for: …` (global fallback when the goal names nothing). `runtime.context()` now also recalls **pinned ADRs the goal names** from semantic memory (M16→M17 bridge: "recall feeds the Context Compiler"), ordered after prior-runs and before the repo map. Plane layering held: cognition/risk stays out of Sensing (sensing→cognition edge forbidden); risk-profile/test-coverage injection deferred (needs M13 wire / M19). No new deps.
+
+#### M18 — Agent Factory ⬜
+- Goal: project-native agents generated from the detected stack — never hand-coded.
+- Build: generation pipeline that emits agents (e.g. routing/query/boundary-enforcer/dependency-cleanup/perf agents) from M8 stack + M13 constraints; each agent carries rules, memory-access scope, risk constraints, allowed actions, hooks, workflows. New CLI `agents`.
+- Deps: M8, M13. Exit: `agents` lists generated agents matching the repo's stack; each respects its risk/memory scope.
+
+#### M19 — Autoskills v2 + Hooks Engine ⬜
+- Goal: skills become executable, multi-phase, gated workflows.
+- Build: skill runtime with phases analyze → simulate → validate → execute → rollback (e.g. `safe-refactor`, `dependency-cleanup`, `architecture-review`). Hooks engine enforcing pre (forbidden-import, boundary, dependency-constraint) and post (lint, typecheck, test, regression, bundle) checks via the broker.
+- Deps: M13, M14. Exit: `safe-refactor` runs all phases; a forbidden-import pre-hook blocks a bad change before write.
+
+#### M20 — Execution Simulation Engine ⬜
+- Goal: predict impact before applying, not only verify after.
+- Build: pre-apply simulation of dependency propagation, type-system impact, API-contract drift, test-failure probability, boundary violations. No real change without simulation validation (unless overridden).
+- Deps: M17, M19. Exit: a high-risk step shows predicted blast radius + test-failure probability before any worktree write.
+
+#### M21 — Autonomous Improvement (`improve` / `refactor` / migration `plan`) ⬜
+- Goal: conservative evolution — better repo, preserved identity.
+- Build: `improve` (safe migration plans, ADR suggestions, dependency cleanup, perf, modularization, testing-gap proposals); `refactor` (constrained execution through M19/M20); engineering-economics gate (cost-of-change / maintenance overhead / ROI) to avoid over-engineering.
+- Deps: M14, M19, M20. Exit: `improve` proposes ranked, ROI-gated changes that never touch NEVER-MODIFY zones; `refactor` applies one through the simulation+hooks+worktree path.
+
+### Phase D — Infrastructure
+
+#### M22 — Daemon Runtime (`watch`) ⬜
+- Goal: continuous intelligence without re-running commands.
+- Build: `archon watch` daemon — FS watcher → git-diff/AST-aware incremental re-index of only the affected graph segment; symbol-level cache; background low-cost analysis.
+- Deps: M8, M12. Exit: editing one file re-indexes only its subtree live; violations refresh in the background.
+
+#### M23 — Provider Orchestration completion ⬜
+- Goal: route each task to the provider that fits it.
+- Build: add Gemini + local-model provider clients; task-based routing (Claude → architecture reasoning / deep context, OpenAI → structured tool execution, Gemini → large-repo ingestion, local → cheap background analysis).
+- Deps: M7. Exit: a large-ingestion task routes to Gemini, a background scan to a local model, with fallback.
+
+#### M24 — Rust core: tree-sitter + vector store ⬜
+- Goal: production-grade parsing + semantic memory.
+- Build: replace the heuristic symbol extractor with tree-sitter (or ts-morph for TS) for accurate symbol/dependency graphs; persist a vector index for semantic memory/retrieval.
+- Deps: M1. Exit: symbol graph matches a tree-sitter parse; semantic recall uses the persisted vector index.
+
+---
+
+## 3. MVP cut vs. full production
+
+Not all 17 milestones are needed to demonstrate the thesis. Suggested cut:
+
+- **Intelligence MVP** (proves "project-native, not generic"): M8 → M9 → M10 → M12.
+  Deliverable: `init` understands the repo, `boundaries` + `violations` make it
+  observable, and project memory files are generated.
+- **Governance MVP** (proves "preserves architecture, constrained autonomy"):
+  + M13 → M14 → M17. Risk-scaled autonomy + preservation + intent-scoped context.
+- **Autonomy MVP** (proves "conservative evolution"): + M19 → M21. One real
+  `safe-refactor` / `improve` flow end-to-end.
+- **Production**: M11, M15, M16, M18, M20, M22, M23, M24 — depth, prediction,
+  generated agents, daemon, full provider mesh, accurate parsing.
+
+## 4. Critical path
+
+```
+M8 ─┬─ M9 ─┬─ M10 ─── M16 ─┐
+    │      ├─ M12 ─── M15   ├─ M17 ─── M20 ─┐
+    │      └─ M13 ─── M14 ──┴───────────────┴─ M19 ─── M21
+    ├─ M11 ─ (M14)
+    ├─ M18
+    └─ M22
+M7 ─ M23     M1 ─ M24
+```
+
+M8 is the keystone — almost everything depends on the architectural fingerprint.
+Start there.

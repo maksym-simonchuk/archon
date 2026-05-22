@@ -18,6 +18,7 @@ import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
 import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
+import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
@@ -171,14 +172,31 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return hits.length ? `# Plugin retrievers for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
   };
 
+  // Pinned ADRs (M16) whose text the task's intent terms name — the binding
+  // decisions a change must respect, recalled into the Context Compiler (M17).
+  const decisionsContext = (task: Task): string => {
+    if (!existsSync(join(root, config.paths.memory))) return '';
+    const terms = decomposeIntent(task.goal);
+    if (terms.length === 0) return '';
+    const hits = memory()
+      .list('semantic')
+      .filter((r) => r.id.startsWith('adr:'))
+      .filter((r) => terms.some((t) => `${r.key} ${r.content}`.toLowerCase().includes(t)))
+      .slice(0, 3);
+    return hits.length
+      ? `# Relevant decisions for: ${task.goal}\n${hits.map((h) => `- ${h.content.split('\n')[0]}`).join('\n')}\n`
+      : '';
+  };
+
   const context = async (task: Task): Promise<string> => {
     // The deterministic scaffolder ignores context, so don't pay to load the
     // index / WASM / memory / plugins for it. Returning '' also keeps a dry-run
-    // `plan` writeless. Memory (prior runs) is ordered ahead of the repo map,
-    // then any retriever-plugin hits.
+    // `plan` writeless. Memory (prior runs) leads, then the decisions that bind
+    // the change (ADRs), then the repo map, then any retriever-plugin hits.
     if (!llmPlanning) return '';
     const sections = [
       await memoryContext(task),
+      decisionsContext(task),
       await repoMapContext(task),
       await pluginRetrieverContext(task),
     ];

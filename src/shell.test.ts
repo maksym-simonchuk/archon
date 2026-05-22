@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelSpec } from './core/types';
 import { buildRuntime, type Runtime } from './runtime';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
-import { completeShell, dispatch, loadHistory, newSession, saveHistory } from './shell';
+import { completeShell, dispatch, loadHistory, newSession, saveHistory, suggestLine } from './shell';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
 
@@ -71,6 +71,61 @@ describe('shell dispatch', () => {
       const out = text(log);
       expect(out).toContain('cost: $0.0000 this session'); // fresh session, nothing spent
       expect(out).toContain('task budget 0% used');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/boundaries reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/boundaries')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/violations reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/violations')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/evolution reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/evolution')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/decisions reports when the repo has no ADRs', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/decisions')).toBe(true);
+      expect(text(log)).toContain('no ADRs found');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/risk asks for a file when given none', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/risk')).toBe(true);
+      expect(text(log)).toContain('usage: /risk <file>');
     } finally {
       rt.close();
     }
@@ -151,6 +206,42 @@ describe('shell tab-completion', () => {
     expect(completeShell('/')[0]).toContain('/plan');
     expect(completeShell('/')[0]).toContain('/plugins');
     expect(completeShell('add a greeter')).toEqual([[], 'add a greeter']);
+  });
+
+  it('completes static subcommands and their values', () => {
+    expect(completeShell('/memory ')).toEqual([['/memory list', '/memory graph'], '/memory ']);
+    expect(completeShell('/policy c')).toEqual([['/policy check'], '/policy c']);
+    expect(completeShell('/decisions ')).toEqual([['/decisions propose'], '/decisions ']);
+    expect(completeShell('/memory list ')[0]).toEqual([
+      '/memory list episodic',
+      '/memory list semantic',
+      '/memory list procedural',
+    ]);
+    expect(completeShell('/memory list se')).toEqual([['/memory list semantic'], '/memory list se']);
+  });
+
+  it('offers nothing for an unknown command or a command without static args', () => {
+    expect(completeShell('/run some goal')).toEqual([[], '/run some goal']);
+    expect(completeShell('/bogus ar')).toEqual([[], '/bogus ar']);
+  });
+});
+
+describe('shell ghost-text autosuggest', () => {
+  const history = ['/run add a greeter', '/plan fix bug', '/status'];
+
+  it('prefers the most-recent matching history entry', () => {
+    expect(suggestLine('/run a', history)).toBe('/run add a greeter');
+    expect(suggestLine('/pl', history)).toBe('/plan fix bug'); // history beats the /plan command
+  });
+
+  it('falls back to a command name when no history matches', () => {
+    expect(suggestLine('/mo', history)).toBe('/model');
+  });
+
+  it('suggests nothing for an empty line, an exact match, or no match', () => {
+    expect(suggestLine('', history)).toBeUndefined();
+    expect(suggestLine('/status', history)).toBeUndefined(); // equal length is not an extension
+    expect(suggestLine('/zzz', history)).toBeUndefined();
   });
 });
 
