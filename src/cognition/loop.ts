@@ -1,4 +1,4 @@
-import type { JournalKind, StepResult, Task, Verdict } from '../core/types';
+import type { BlastRadius, JournalKind, StepResult, Task, Verdict } from '../core/types';
 import type { PreHookFinding } from '../effecting/hooks';
 import type { Transaction } from '../effecting/transaction';
 import type { TaskJournal } from '../services/task-journal';
@@ -34,6 +34,15 @@ export interface CognitionLoopDeps {
    * authorise one — tighten, never widen.
    */
   preApply?: (writes: { target: string; content: string }[]) => Promise<PreHookFinding[]>;
+  /**
+   * Estimate the blast radius (transitively-impacted symbols/files) of writing to
+   * `target`. When provided, the loop stamps each write step's capability with the
+   * result so the Policy Engine can escalate or deny on the existing
+   * `blast_radius_files_*` rules (M13). Advisory data the planner can't compute;
+   * omitted ⇒ the broker sees no blast radius and those rules stay dormant. It can
+   * only add a constraint the policy may act on — never grant authority.
+   */
+  blastRadiusFor?: (target: string) => Promise<BlastRadius | undefined>;
   /** Provider spend (USD) to record as the run's `cost` entry; omitted ⇒ no cost entry. */
   cost?: () => number;
 }
@@ -57,13 +66,26 @@ export class CognitionLoop {
   constructor(private readonly deps: CognitionLoopDeps) {}
 
   async run(task: Task, context = ''): Promise<StepResult[]> {
-    const { planner, transaction, reflector, journal, executorFor, verifierFor, verifierPlugins, preApply, cost } = this.deps;
+    const { planner, transaction, reflector, journal, executorFor, verifierFor, verifierPlugins, preApply, blastRadiusFor, cost } = this.deps;
     const note = (kind: JournalKind, payload: unknown): void => {
       journal.append({ taskId: task.id, ts: new Date().toISOString(), kind, payload });
     };
 
     const cog = await planner.plan(task, context);
     note('plan', { rationale: cog.plan.rationale, steps: cog.plan.steps.map((s) => s.intent) });
+
+    // M13: stamp each write step with its estimated blast radius so the broker's
+    // Policy Engine can apply the `blast_radius_files_*` rules. The planner can't
+    // see across the symbol graph, so this is the only point the data exists. A
+    // step the policy then asks/denies fails at the broker → the run discards.
+    if (blastRadiusFor) {
+      for (const step of cog.plan.steps) {
+        const action = cog.actions[step.id];
+        if (action?.kind !== 'write') continue;
+        const radius = await blastRadiusFor(action.target);
+        if (radius) step.capability.blastRadius = radius;
+      }
+    }
 
     // Pre-apply gate (M19): a `block` finding (write into a never-modify zone, or
     // an import that would close a module cycle) stops the run before any worktree

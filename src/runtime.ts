@@ -13,7 +13,7 @@ import { ScaffoldStrategy } from './cognition/scaffold-strategy';
 import type { PlanStrategy } from './cognition/types';
 import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
-import type { MemoryTier, Profile, Task } from './core/types';
+import type { BlastRadius, MemoryTier, Profile, Task } from './core/types';
 import { AgentBroker } from './effecting/agent-broker';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
@@ -306,6 +306,25 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     }
   };
 
+  // M13: estimate the real blast radius of writing to a file by treating every
+  // symbol it defines as "changed" and taking the reverse-reachable closure over
+  // the symbol graph. This replaces the planner's safe-minimum stub (target file
+  // only) with the true transitive impact, so the broker's Policy Engine can
+  // apply the `blast_radius_files_*` rules. No index, or an unindexed/symbol-less
+  // file ⇒ undefined: the planner's stub stands and the rules stay dormant.
+  const blastRadiusFor = async (target: string): Promise<BlastRadius | undefined> => {
+    const indexPath = join(root, config.paths.index);
+    if (!existsSync(indexPath)) return undefined;
+    const store = new IndexStore(indexPath);
+    try {
+      const seeds = store.allSymbols().filter((s) => s.file === target).map((s) => s.name);
+      if (seeds.length === 0) return undefined;
+      return await new SymbolGraph(store).blastRadius(seeds);
+    } finally {
+      store.close();
+    }
+  };
+
   const loop = (agent?: AgentSpec, opts: { force?: boolean } = {}): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
@@ -331,6 +350,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
         if (opts.force) return structural;
         return [...structural, ...(await preservationFindings(writes))];
       },
+      blastRadiusFor,
       cost: () => router.spent,
     });
 

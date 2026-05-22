@@ -29,8 +29,8 @@ The spec asks for a *repository operating system*. What exists today is the
 | Preservation layer (intentional vs accidental complexity) | ✅ classifier + **loop-internal hard gate** (preserve → block before worktree, `run --force` overrides) | — |
 | Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
 | Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
-| Risk engine (low/med/high/critical → autonomy scaling) | 🟡 blast-radius gate | No risk scoring, no test-regression probability |
-| Execution simulation (pre-apply impact prediction) | ✅ pre-apply dependency/type/contract/regression prediction + **hard loop gate** (M20) | Risk→PolicyEngine escalation (M13) still advisory |
+| Risk engine (low/med/high/critical → autonomy scaling) | ✅ `scoreRisk` advisory + **live blast-radius policy gate** (real graph radius stamped on every write step → broker ask/deny) | Risk *level* not yet stamped on steps; no test-regression probability |
+| Execution simulation (pre-apply impact prediction) | ✅ pre-apply dependency/type/contract/regression prediction + **hard loop gate** (M20) | — |
 | Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
 | Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
 | Philosophy + economics + confidence layers | ⬜ | None |
@@ -85,12 +85,12 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Deps: M9. Exit: `violations` ranks findings by impact; `doctor` reports health score, not just readiness.
 - Done: `detectViolations` (`src/sensing/violations.ts`) emits the high-confidence detectors the substrate supports — circular deps (high), god modules (med), stable-dependency-principle violations (med), missing tests (low) — each scored severity × (1 + module criticality/fanIn) and ranked. `healthScore` = 100 − weighted penalties. `/violations` (`cmdViolations`) lists them; `doctor` now carries a `health` block (score + severity counts). Deferred (need signals not yet indexed): dead code, duplication, layering, inconsistent patterns.
 
-#### M13 — Risk + Confidence + Invariants Engine 🟡 (read-only slice)
+#### M13 — Risk + Confidence + Invariants Engine ✅ (advisory slice + blast-radius policy wire)
 - Goal: governance primitives that scale autonomy to safety.
 - Build: classify code regions (stable / evolving / experimental / deprecated) and NEVER-MODIFY zones (auth, payments, public APIs, infra). Per-module **confidence score**. **Risk scoring** (low/med/high/critical) from blast radius + criticality + confidence + test-regression probability. Wire into the Policy Engine so autonomy/approval scale with risk.
 - Deps: M9, M12. Exit: a write into a critical/low-confidence region escalates to `ask`; risk level is attached to every planned step.
 - Done (advisory slice — Policy Engine deliberately UNTOUCHED, pending its own review): `scoreRisk` (`src/cognition/risk.ts`) → low/med/high/critical from blast radius + module criticality (fan-in) + confidence (test-coverage ratio, `moduleConfidence`) + never-modify zones; coarse region from module role. `/risk <file>` (`cmdRisk`) shows level + rationale.
-- Deferred: wiring risk into the Policy Engine gate (escalate critical-region writes to `ask`) and attaching risk to every planned step — these change the safety path and are a separate milestone.
+- Done (policy wire — **no Policy Engine / broker change**, tighten-only): the cognition loop now stamps each write step with the **real graph blast radius** (`CognitionLoopDeps.blastRadiusFor` → `runtime.blastRadiusFor`: every symbol the target file defines, reverse-reachable closure via `SymbolGraph.blastRadius`). This replaces the planners' safe-minimum stub (target file only) that left the existing `blast_radius_files_exceeds: 5` ask / `blast_radius_files_max: 25` hard-limit rules dormant. A write whose true blast radius exceeds the limit is now denied at the broker → the step fails → the worktree discards. No index / unindexed file ⇒ `undefined` ⇒ the planner stub stands. The gate can only add a constraint the policy may act on, never grant authority.
 
 #### M14 — Preservation Layer ✅ (now a loop-internal hard gate)
 - Goal: distinguish intentional from accidental complexity; protect project identity.

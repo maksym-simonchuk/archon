@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { PlanStep, Task, Verdict } from '../core/types';
+import type { BlastRadius, PlanStep, Task, Verdict } from '../core/types';
 import { AuditLog } from '../effecting/audit-log';
 import { CapabilityBroker } from '../effecting/capability-broker';
 import { loadPolicy, PolicyEngine } from '../effecting/policy-engine';
@@ -53,6 +53,7 @@ function loopFor(
   cost?: () => number,
   verifierPlugins?: (files: string[]) => Promise<Verdict[]>,
   preApply?: CognitionLoopDeps['preApply'],
+  blastRadiusFor?: CognitionLoopDeps['blastRadiusFor'],
 ): CognitionLoop {
   const audit = new AuditLog();
   // `trusted` so worktree/merge git ops are permitted; the broker still gates each.
@@ -67,6 +68,7 @@ function loopFor(
     verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
     verifierPlugins,
     preApply,
+    blastRadiusFor,
     cost,
   });
 }
@@ -146,6 +148,46 @@ describe('CognitionLoop (M6)', () => {
     const results = await loopFor(repo, wt, failing, memory, journal).run(task('bad task'));
     expect(results.some((r) => !r.verdict.passed)).toBe(true);
     expect(await exists(join(repo, 'archon-demo', 'x.mjs'))).toBe(false); // never merged
+    memory.close();
+    journal.close();
+  });
+
+  it('denies a write whose computed blast radius exceeds the hard limit (M13)', async () => {
+    repo = await initRepo();
+    wt = await mkdtemp(join(tmpdir(), 'archon-cwt-'));
+    const memory = new MemoryStore(':memory:');
+    const journal = new TaskJournal(':memory:');
+
+    // The strategy proposes a perfectly ordinary single-file write (its own stub
+    // blast radius is just the target — under every threshold). The loop then
+    // stamps the step with the *real* graph blast radius, which here is 30 files —
+    // above policy.yaml's `limits.blast_radius_files_max: 25`. The broker must deny
+    // the fs.write, so the step fails and nothing is merged.
+    const target = 'archon-demo/wide.mjs';
+    const wide: PlanStrategy = {
+      propose: async (t): Promise<CognitivePlan> => {
+        const step: PlanStep = {
+          id: `${t.id}-s1`,
+          intent: `create ${target}`,
+          capability: { action: 'fs.write', target, blastRadius: { files: [target], symbols: [], escapesRepo: false }, reason: 'wide' },
+          reversible: true,
+        };
+        return {
+          plan: { taskId: t.id, rationale: 'a write with a huge blast radius', steps: [step] },
+          actions: { [step.id]: { kind: 'write', target, content: 'export const wide = 1;\n' } },
+          checks: [],
+        };
+      },
+    };
+    const blastRadiusFor = async (file: string): Promise<BlastRadius> => ({
+      files: [...Array.from({ length: 30 }, (_, i) => `src/m${i}.ts`), file],
+      symbols: [],
+      escapesRepo: false,
+    });
+
+    const results = await loopFor(repo, wt, wide, memory, journal, undefined, undefined, undefined, blastRadiusFor).run(task('wide task'));
+    expect(results.some((r) => !r.verdict.passed)).toBe(true);
+    expect(await exists(join(repo, 'archon-demo', 'wide.mjs'))).toBe(false); // denied → never merged
     memory.close();
     journal.close();
   });
