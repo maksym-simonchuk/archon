@@ -101,6 +101,33 @@ describe('cmdAsk (streaming /ask)', () => {
     expect(answer).toBe('');
     expect(log.mock.calls.flat().join('\n')).toContain('no LLM provider configured');
   });
+
+  it('keeps the partial answer and footers it cancelled when the stream is aborted', async () => {
+    const write = muteStdout();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const controller = new AbortController();
+    const client: ProviderClient = {
+      provider: 'fake',
+      complete: () => Promise.reject(new Error('unused on /ask path')),
+      completeObject: () => Promise.reject(new Error('unused on /ask path')),
+      completeStream: (_m, _p, _mt, signal) => {
+        async function* gen(): AsyncGenerator<string> {
+          yield 'par';
+          controller.abort(); // user hits Ctrl-C mid-stream
+          if (signal?.aborted) return;
+          yield 'tial';
+        }
+        return { textStream: gen(), usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }) };
+      },
+    };
+    const router = new ProviderRouter([model], [client]);
+
+    const answer = await cmdAsk(fakeRt(true, router), 'explain', [], controller.signal);
+
+    expect(answer).toBe('par'); // the partial answer is preserved, not discarded
+    expect(write.mock.calls.map((c) => String(c[0])).join('')).toContain('par');
+    expect(log.mock.calls.flat().join('\n')).toContain('(cancelled)'); // footered as cancelled, no cost
+  });
 });
 
 describe('extractFileRefs', () => {

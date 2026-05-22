@@ -81,7 +81,16 @@ async function main(argv: string[]): Promise<void> {
     case 'ask':
       if (!goal) return usageError('ask <question>');
       return withRuntime(async (rt) => {
-        await cmdAsk(rt, goal); // one-shot: no transcript, discard the returned text
+        // No readline here, so Ctrl-C arrives as a process signal: catch it to
+        // abort the stream gracefully (partial answer kept) instead of a hard kill.
+        const controller = new AbortController();
+        const onSigint = (): void => controller.abort();
+        process.once('SIGINT', onSigint);
+        try {
+          await cmdAsk(rt, goal, [], controller.signal); // one-shot: no transcript
+        } finally {
+          process.removeListener('SIGINT', onSigint);
+        }
       });
     case 'status':
       return withRuntime((rt) => cmdStatus(rt, { json }));

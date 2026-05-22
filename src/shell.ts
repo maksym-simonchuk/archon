@@ -29,6 +29,8 @@ const ASK_CONTEXT_TURNS = 8;
 /** Mutable per-REPL state that must persist across dispatched lines (the /ask transcript). */
 export interface ShellSession {
   askHistory: AskTurn[];
+  /** Controller for an in-flight /ask, if any — Ctrl-C aborts it (see `startShell`). */
+  abort?: AbortController;
 }
 export const newSession = (): ShellSession => ({ askHistory: [] });
 
@@ -133,8 +135,16 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     case '/ask':
       if (needGoal()) {
-        const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS));
-        if (answer) session.askHistory.push({ question: arg, answer });
+        // Publish a controller for the SIGINT handler, then always retract it so
+        // a later Ctrl-C at the prompt exits the shell rather than aborting nothing.
+        const controller = new AbortController();
+        session.abort = controller;
+        try {
+          const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS), controller.signal);
+          if (answer) session.askHistory.push({ question: arg, answer });
+        } finally {
+          session.abort = undefined;
+        }
       }
       return true;
     case '/clear':
@@ -207,6 +217,13 @@ export async function startShell(): Promise<void> {
   // latest so we can persist it once on exit rather than on every keystroke.
   rl.on('history', (h: string[]) => {
     history = h;
+  });
+  // Ctrl-C cancels an in-flight /ask and stays in the shell; with nothing
+  // streaming it means "leave", same as Ctrl-D. (readline owns SIGINT once it
+  // has a listener, so this never kills the process mid-stream.)
+  rl.on('SIGINT', () => {
+    if (session.abort) session.abort.abort();
+    else rl.close();
   });
 
   console.log('archon interactive shell — /help for commands, /exit to quit');
