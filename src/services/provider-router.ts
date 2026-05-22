@@ -1,5 +1,21 @@
 import type { ZodType } from 'zod';
-import type { Completion, ModelSpec, RouteRequest, TaskClass } from '../core/types';
+import { type Completion, type ModelSpec, type RouteRequest, type TaskClass, TASK_CLASSES } from '../core/types';
+
+/** A model in the registry plus whether a client backs it — read-only introspection. */
+export interface ModelInfo {
+  id: string;
+  provider: string;
+  strengths: TaskClass[];
+  costPer1kInput: number;
+  costPer1kOutput: number;
+  ready: boolean;
+}
+
+/** The router's resolved routing, for `/model`: the registry + the per-task chain. */
+export interface RoutingTable {
+  models: ModelInfo[];
+  routes: { taskClass: TaskClass; chain: string[] }[];
+}
 
 /** A provider's completion backend. HTTP clients (prod) and fakes (tests) share this. */
 export interface ProviderClient {
@@ -73,6 +89,25 @@ export class ProviderRouter {
   /** Total cost charged so far (sum of non-cached completions). */
   get spent(): number {
     return this.spentUsd;
+  }
+
+  /**
+   * Read-only routing introspection (powers `archon model` / `/model`): every
+   * registered model with whether a client backs it, and the resolved model
+   * chain per task class (first entry = the model that will be chosen). Pure —
+   * it performs no provider calls.
+   */
+  routingTable(): RoutingTable {
+    const models = [...this.models.values()].map((m) => ({
+      id: m.id,
+      provider: m.provider,
+      strengths: m.strengths,
+      costPer1kInput: m.costPer1kInput,
+      costPer1kOutput: m.costPer1kOutput,
+      ready: this.clients.has(m.provider),
+    }));
+    const routes = TASK_CLASSES.map((taskClass) => ({ taskClass, chain: this.routeChain(taskClass) }));
+    return { models, routes };
   }
 
   async complete(req: RouteRequest): Promise<Completion> {

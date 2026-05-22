@@ -229,6 +229,38 @@ export function cmdCost(rt: Runtime): void {
   if (spent >= b.perTaskUsd) console.log('  ⚠ per-task budget reached — the router will refuse further calls');
 }
 
+/**
+ * Show the provider routing table: every configured model (provider, strengths,
+ * indicative per-1k cost, and whether a client is wired) and, per task class, the
+ * resolved model chain — first entry is the one that will be chosen. Read-only;
+ * `✓` = a client backs it, `○` = configured but no key, so it can't actually run.
+ */
+export function cmdModel(rt: Runtime): void {
+  const { models, routes } = rt.router.routingTable();
+  if (models.length === 0) {
+    console.log('model: none configured — add providers to archon.config.json (see `archon doctor`)');
+    return;
+  }
+  console.log(`models (${models.length} configured):`);
+  for (const m of models) {
+    const cost = `$${m.costPer1kInput}/$${m.costPer1kOutput} per 1k`;
+    const note = m.ready ? '' : '  (no client — key missing)';
+    console.log(`  ${m.ready ? '✓' : '○'} ${m.id}  [${m.provider}]  {${m.strengths.join(' ')}}  ${cost}${note}`);
+  }
+  console.log('routing (task class → model chain, first is chosen):');
+  const known = new Set(models.map((m) => m.id));
+  let dangling = false;
+  for (const r of routes) {
+    const chain = r.chain.map((id) => {
+      if (known.has(id)) return id;
+      dangling = true;
+      return `${id}(?)`; // configured in routing but absent from the registry
+    });
+    console.log(`  ${r.taskClass.padEnd(10)} ${chain.length ? chain.join(' → ') : '(none)'}`);
+  }
+  if (dangling) console.log('  (? = configured in routing but not in the model registry — skipped at run time)');
+}
+
 /** Recall prior episodes for a goal, semantically reranked by the bundled retriever. */
 export async function cmdMemory(rt: Runtime, goal: string): Promise<void> {
   const retriever = await rt.retriever('episodic', goal);

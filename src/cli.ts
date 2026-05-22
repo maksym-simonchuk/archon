@@ -9,6 +9,7 @@ import {
   cmdDoctor,
   cmdIndex,
   cmdMemory,
+  cmdModel,
   cmdPlan,
   cmdPlugins,
   cmdPromote,
@@ -32,6 +33,7 @@ Usage:
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
   archon status [--json]  Show task journal + budgets                   (M0)
   archon doctor [--json]  Report runtime readiness (planner/keys/state)
+  archon model            Show the provider routing table                (M7)
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon plugins          List loaded plugins + capability previews     (M7)
@@ -85,6 +87,10 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdStatus(rt, { json }));
     case 'doctor':
       return withRuntime((rt) => cmdDoctor(rt, { json }));
+    case 'model':
+      return withRuntime(async (rt) => {
+        cmdModel(rt);
+      });
     case 'plugins':
       return withRuntime(cmdPlugins);
     case 'tool': {

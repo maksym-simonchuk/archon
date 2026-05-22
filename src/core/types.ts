@@ -125,7 +125,10 @@ export interface Verdict {
 }
 
 // ── Providers ──────────────────────────────────────────────────────────────────
-export type TaskClass = 'plan' | 'summarize' | 'reason' | 'diff' | 'embed';
+/** Every task class, as a runtime tuple so callers can iterate (e.g. the router's
+ *  routing table); `TaskClass` is derived from it so the two never drift. */
+export const TASK_CLASSES = ['plan', 'summarize', 'reason', 'diff', 'embed'] as const;
+export type TaskClass = (typeof TASK_CLASSES)[number];
 
 export interface ModelSpec {
   id: string;

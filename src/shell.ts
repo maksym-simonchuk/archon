@@ -8,6 +8,7 @@ import {
   cmdDoctor,
   cmdIndex,
   cmdMemory,
+  cmdModel,
   cmdPlan,
   cmdPlugins,
   cmdPromote,
@@ -40,6 +41,7 @@ const COMMANDS = [
   '/index',
   '/status',
   '/cost',
+  '/model',
   '/doctor',
   '/memory',
   '/promote',
@@ -58,6 +60,7 @@ const SHELL_HELP = `commands:
   /index           incrementally index changed files
   /status          task journal + budgets
   /cost            session spend vs the per-task budget
+  /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
@@ -146,6 +149,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     case '/cost':
       cmdCost(rt);
+      return true;
+    case '/model':
+      cmdModel(rt);
       return true;
     case '/doctor':
       await cmdDoctor(rt);

@@ -110,4 +110,17 @@ describe('ProviderRouter (M7)', () => {
     await router.streamComplete(req('summarize', 'p1'), () => {}); // spends $2
     await expect(router.streamComplete(req('summarize', 'p2'), () => {})).rejects.toThrow(/budget exhausted/);
   });
+
+  it('routingTable reports per-model readiness and the resolved per-task chain', () => {
+    const router = new ProviderRouter(
+      [model('cheap', 'a', ['plan', 'summarize'], 0.5), model('strong', 'b', ['reason', 'diff'], 4)],
+      [client('a')], // only provider 'a' has a wired client
+    );
+    const { models, routes } = router.routingTable();
+    expect(models.find((m) => m.id === 'cheap')?.ready).toBe(true);
+    expect(models.find((m) => m.id === 'strong')?.ready).toBe(false); // provider 'b' unwired
+    expect(routes.find((r) => r.taskClass === 'plan')?.chain).toEqual(['cheap']);
+    expect(routes.find((r) => r.taskClass === 'reason')?.chain).toEqual(['strong']);
+    expect(routes.find((r) => r.taskClass === 'embed')?.chain).toEqual([]); // nothing serves embed
+  });
 });
