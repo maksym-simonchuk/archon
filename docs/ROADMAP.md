@@ -7,6 +7,10 @@ under `src/` (and `crates/` for the Rust core).
 
 Toolchain: **Node ≥ 24** (host; uses built-in `node:sqlite`) + **Rust stable & `wasm-pack`** (compute core, ADR-0011).
 
+> M0–M7 below build the **safety + cognition substrate**. The **repository-intelligence
+> half** of the spec (deep `init`, boundaries, violations, preservation, autonomy,
+> daemon — milestones M8→M24) is planned in [`ROADMAP-INTELLIGENCE.md`](ROADMAP-INTELLIGENCE.md).
+
 Legend: ✅ done · ⬜ todo
 
 ## M0 — Foundations ✅ (this scaffold)

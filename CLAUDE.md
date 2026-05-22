@@ -21,7 +21,7 @@ is tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md)).
 ## Commands
 
 - `npm run typecheck` — must pass before "done"
-- `npm run dev -- <cmd>` — run the CLI (e.g. `npm run dev -- --help`)
+- `npm run dev` — launch the interactive TUI (the sole surface; `/help` lists commands)
 - `npm run build` — emit `dist/`
 
 ## Working here

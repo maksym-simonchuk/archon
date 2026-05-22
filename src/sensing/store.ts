@@ -1,11 +1,24 @@
 import { DatabaseSync } from 'node:sqlite';
-import type { ParsedEdge, ParsedSymbol } from '../core/types';
+import type { BoundaryModel } from './boundaries';
+import type { ArchitecturalFingerprint, ParsedEdge, ParsedSymbol } from '../core/types';
 
 /** An edge as queried back from the store (file provenance lives in `edges.file`). */
 export interface StoredEdge {
   src: string;
   dst: string;
   kind: ParsedEdge['kind'];
+}
+
+/** One architecture-health reading at a point in repo history (M15 trend line). */
+export interface HealthSnapshot {
+  /** ISO timestamp the snapshot was recorded. */
+  ts: string;
+  /** The fingerprint `inputHash` this reading describes (its repo-state key). */
+  inputHash: string;
+  score: number;
+  high: number;
+  medium: number;
+  low: number;
 }
 
 /**
@@ -44,10 +57,69 @@ export class IndexStore {
         kind TEXT NOT NULL,
         file TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS arch_fingerprint (
+        id      TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS module_intelligence (
+        id      TEXT PRIMARY KEY,
+        payload TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS file_edges (
+        src TEXT NOT NULL,
+        dst TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS health_history (
+        id         INTEGER PRIMARY KEY,
+        ts         TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        score      INTEGER NOT NULL,
+        high       INTEGER NOT NULL,
+        medium     INTEGER NOT NULL,
+        low        INTEGER NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
       CREATE INDEX IF NOT EXISTS idx_symbols_file ON symbols(file);
       CREATE INDEX IF NOT EXISTS idx_edges_file ON edges(file);
+      CREATE INDEX IF NOT EXISTS idx_file_edges_src ON file_edges(src);
+      CREATE INDEX IF NOT EXISTS idx_file_edges_dst ON file_edges(dst);
     `);
+  }
+
+  /** The repository's structural fingerprint (M8), or undefined if never scanned. */
+  getFingerprint(): ArchitecturalFingerprint | undefined {
+    const row = this.db
+      .prepare("SELECT payload FROM arch_fingerprint WHERE id = 'current'")
+      .get() as { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as ArchitecturalFingerprint) : undefined;
+  }
+
+  /** Persist the latest structural fingerprint (single-row; overwrites in place). */
+  saveFingerprint(fp: ArchitecturalFingerprint): void {
+    this.db
+      .prepare(
+        "INSERT INTO arch_fingerprint (id, payload) VALUES ('current', ?) " +
+          'ON CONFLICT(id) DO UPDATE SET payload = excluded.payload',
+      )
+      .run(JSON.stringify(fp));
+  }
+
+  /** The persisted boundary/module intelligence layer (M10), or undefined if never derived. */
+  loadModuleIntelligence(): BoundaryModel | undefined {
+    const row = this.db
+      .prepare("SELECT payload FROM module_intelligence WHERE id = 'current'")
+      .get() as { payload: string } | undefined;
+    return row ? (JSON.parse(row.payload) as BoundaryModel) : undefined;
+  }
+
+  /** Persist the latest module intelligence (single-row; overwrites in place). */
+  saveModuleIntelligence(model: BoundaryModel): void {
+    this.db
+      .prepare(
+        "INSERT INTO module_intelligence (id, payload) VALUES ('current', ?) " +
+          'ON CONFLICT(id) DO UPDATE SET payload = excluded.payload',
+      )
+      .run(JSON.stringify(model));
   }
 
   /** Content hash recorded for a file, or undefined if never indexed. */
@@ -92,11 +164,62 @@ export class IndexStore {
       this.db.prepare('DELETE FROM files WHERE path = ?').run(path);
       this.db.prepare('DELETE FROM symbols WHERE file = ?').run(path);
       this.db.prepare('DELETE FROM edges WHERE file = ?').run(path);
+      this.db.prepare('DELETE FROM file_edges WHERE src = ?').run(path);
       this.db.exec('COMMIT');
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
     }
+  }
+
+  /**
+   * Replace `src`'s outgoing cross-file import edges in one transaction (the
+   * file-level companion to `replaceFileGraph`). `dsts` are repo-relative paths
+   * `src` imports; reindexing a file overwrites only its own import slice.
+   */
+  replaceFileImports(src: string, dsts: string[]): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM file_edges WHERE src = ?').run(src);
+      const insert = this.db.prepare('INSERT INTO file_edges (src, dst) VALUES (?, ?)');
+      for (const dst of dsts) insert.run(src, dst);
+      this.db.exec('COMMIT');
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+
+  /**
+   * Append an architecture-health snapshot (M15). Append-only time series: the
+   * caller records one per indexed repo-state change (`init` gates on a changed
+   * fingerprint), and the trend in `doctor` is read back from the sequence.
+   */
+  appendHealthSnapshot(snap: HealthSnapshot): void {
+    this.db
+      .prepare('INSERT INTO health_history (ts, input_hash, score, high, medium, low) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(snap.ts, snap.inputHash, snap.score, snap.high, snap.medium, snap.low);
+  }
+
+  /** Every health snapshot, oldest first — the temporal health trend (M15). */
+  loadHealthHistory(): HealthSnapshot[] {
+    const rows = this.db
+      .prepare('SELECT ts, input_hash, score, high, medium, low FROM health_history ORDER BY id ASC')
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      ts: r.ts as string,
+      inputHash: r.input_hash as string,
+      score: r.score as number,
+      high: r.high as number,
+      medium: r.medium as number,
+      low: r.low as number,
+    }));
+  }
+
+  /** Every file→file import edge — the module-topology substrate (M9). */
+  loadFileEdges(): { src: string; dst: string }[] {
+    const rows = this.db.prepare('SELECT src, dst FROM file_edges').all() as Array<Record<string, unknown>>;
+    return rows.map((r) => ({ src: r.src as string, dst: r.dst as string }));
   }
 
   /** Every edge in the graph (caller filters by kind). */

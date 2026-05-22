@@ -39,6 +39,7 @@ describe('archon doctor', () => {
     expect(out).toContain('providers: none configured');
     expect(out).toContain('plugins:   0 loaded');
     expect(out).toContain('index:   absent');
+    expect(out).toContain('health:    no index'); // no index ⇒ no health score
     // probing existence must not open (create) any db
     expect(existsSync(join(rt.root, '.archon/index.db'))).toBe(false);
     expect(existsSync(join(rt.root, '.archon/memory.db'))).toBe(false);
@@ -64,8 +65,28 @@ describe('archon doctor', () => {
     expect(report.providers).toEqual([]);
     expect(report.state).toEqual({ index: false, memory: false, journal: false });
     expect(report.plugins).toBe(0);
+    expect(report.health).toBeNull(); // no index to assess
+    expect(report.evolution).toBeNull(); // no index ⇒ no evolution forecast
     // probing existence for the JSON path must still create no db
     expect(existsSync(join(rt.root, '.archon/index.db'))).toBe(false);
+    rt.close();
+  });
+
+  it('surfaces a health trend and evolution forecast once an index exists (M15)', async () => {
+    const rt = await runtimeWith();
+    const { store, close } = await rt.indexer();
+    // Two recorded scans → a trend; a near-god module record → an evolution lookup target.
+    store.appendHealthSnapshot({ ts: '2026-01-01T00:00:00Z', inputHash: 'h1', score: 90, high: 0, medium: 1, low: 2 });
+    store.appendHealthSnapshot({ ts: '2026-02-01T00:00:00Z', inputHash: 'h2', score: 94, high: 0, medium: 0, low: 2 });
+    close();
+
+    const log = captured();
+    await cmdDoctor(rt, { json: true });
+    const report = JSON.parse(text(log));
+
+    expect(report.health.trend).toBe(4); // 94 − 90 across the last two scans
+    expect(report.evolution).not.toBeNull(); // index present ⇒ forecast computed (temp repo: 0 commits)
+    expect(report.evolution.commitsAnalyzed).toBe(0);
     rt.close();
   });
 });

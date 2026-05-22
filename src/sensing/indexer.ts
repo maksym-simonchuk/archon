@@ -1,7 +1,10 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { extname, join } from 'node:path';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import { realContainedPath } from '../core/path-safety';
+import { type Commit, parseGitLog } from './evolution';
+import { extractImports, resolveImport } from './import-resolver';
 import type { ComputeCore } from '../core/compute';
 import type { FileHash } from '../core/types';
 import type { IndexStore } from './store';
@@ -48,6 +51,21 @@ export class Indexer {
   }
 
   /**
+   * The last `limit` commits with the paths each touched (M15 churn substrate).
+   * Read-only `git log` — allowed directly under the safe policy, like `status`.
+   * The NUL-prefixed `%H` header lets the pure parser separate commits from the
+   * `--name-only` file lists unambiguously.
+   */
+  async commitHistory(limit = 200): Promise<Commit[]> {
+    try {
+      const raw = await this.git.raw(['log', `-n${limit}`, '--name-only', '--pretty=format:%x00%H']);
+      return parseGitLog(raw);
+    } catch {
+      return []; // no commits yet (or not a git repo) — no history to analyze
+    }
+  }
+
+  /**
    * Reindex exactly the given paths. Files whose content hash is unchanged are
    * skipped (this is what "no full rescan" means in practice); changed files are
    * re-parsed and their graph slice replaced. Paths git reports as dirty include
@@ -78,11 +96,30 @@ export class Indexer {
       const bytes = bytesByPath.get(path);
       if (language !== undefined && bytes !== undefined) {
         this.graph.applyParse(path, await this.core.parseSymbols(language, path, bytes));
+        if (language === 'typescript' || language === 'javascript') {
+          this.store.replaceFileImports(path, this.resolveImports(path, bytes));
+        }
       }
       // Record the hash only after the graph slice is updated: a parse failure
       // then leaves the file dirty for the next run instead of marking it stale.
       this.store.upsertFileHash(path, hash);
     }
+  }
+
+  /**
+   * Cross-file `imports` edges for one TS/JS file (M8.5): decode, pull
+   * specifiers, resolve the relative ones to real repo files. Existence is
+   * checked against the repo root (a sibling dirty file may not be on disk yet,
+   * but already-indexed neighbours are); self-imports are excluded.
+   */
+  private resolveImports(path: string, bytes: Uint8Array): string[] {
+    const source = new TextDecoder().decode(bytes);
+    const dsts = new Set<string>();
+    for (const spec of extractImports(source)) {
+      const dst = resolveImport(path, spec, (rel) => existsSync(join(this.repoRoot, ...rel.split('/'))));
+      if (dst !== undefined && dst !== path) dsts.add(dst);
+    }
+    return [...dsts];
   }
 
   private async readFileOrNull(path: string): Promise<Uint8Array | null> {

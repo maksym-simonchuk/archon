@@ -51,7 +51,7 @@ archon/
 ```bash
 npm install
 npm run typecheck          # must pass
-npm run dev -- --help      # CLI surface
+npm run dev                # launch the interactive TUI (/help lists commands)
 
 # Compute core (optional until M1; needs Rust + wasm-pack):
 npm run build:wasm

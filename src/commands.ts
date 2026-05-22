@@ -3,12 +3,18 @@
 // already-built Runtime and does NOT own its lifecycle — the caller closes it.
 
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFile, readdir } from 'node:fs/promises';
+import { join, posix } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
 import type { JournalEntry, MemoryTier, PolicyDecision, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
+import { type BoundaryModel, formatBoundaries, inferBoundaries, moduleOf } from './sensing/boundaries';
+import { assessSignificance, type Decision, formatDecisions, matchesQuery, parseAdr, proposeAdr } from './memory/decisions';
+import { analyzeEvolution, type EvolutionModel, formatEvolution } from './sensing/evolution';
+import { detectViolations, formatViolations, moduleConfidence, type ViolationReport } from './sensing/violations';
+import { type FileRisk, formatRisk, scoreRisk } from './cognition/risk';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
@@ -535,6 +541,221 @@ export async function cmdMap(rt: Runtime, opts: { json?: boolean } = {}): Promis
   }
 }
 
+/**
+ * Surface the inferred bounded contexts (M9): cluster the file-import graph
+ * into modules and report fan-in/out, instability, coupling hotspots,
+ * god-module candidates, and circular dependencies. Read-only and WASM-free —
+ * opens the existing index directly and re-derives the model each run (run
+ * `archon index` first). The import edges it reads are built incrementally by
+ * the indexer (M8.5), so boundaries reflect the last-indexed state.
+ */
+export async function cmdBoundaries(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (): BoundaryModel => ({ modules: [], couplingHotspots: [], godModules: [], cycles: [] });
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('boundaries: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const model = inferBoundaries(store.allFileHashes(), store.loadFileEdges());
+    if (opts.json) console.log(JSON.stringify(model, null, 2));
+    else console.log(formatBoundaries(model));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Render the machine-readable intelligence layer (M10): the persisted boundary
+ * model (`module_intelligence`, written by `archon init`), falling back to a
+ * live derivation from the current index. The graph view of `memory` — where
+ * `memory list` shows stored records and `memory <goal>` recalls episodes, this
+ * shows the architectural model the runtime reasons over. Read-only.
+ */
+export async function cmdMemoryGraph(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (): BoundaryModel => ({ modules: [], couplingHotspots: [], godModules: [], cycles: [] });
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('memory --graph: no index yet — run `archon index` then `archon init`');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const model = store.loadModuleIntelligence() ?? inferBoundaries(store.allFileHashes(), store.loadFileEdges());
+    if (opts.json) console.log(JSON.stringify(model, null, 2));
+    else console.log(formatBoundaries(model));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Architecture-health findings (M12): detect circular dependencies, god
+ * modules, stable-dependency violations, and missing tests over the indexed
+ * graph, ranked by severity × criticality. Read-only — derives from the
+ * existing index (run `archon index` first). The shared detector also backs the
+ * health score in `doctor`.
+ */
+export async function cmdViolations(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (): ViolationReport => ({ violations: [], healthScore: 100, countsBySeverity: { high: 0, medium: 0, low: 0 } });
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('violations: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const report = detectViolations(buildViolationInput(store));
+    if (opts.json) console.log(JSON.stringify(report, null, 2));
+    else console.log(formatViolations(report));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Risk assessment for a file (M13, read-only): combine its blast radius with its
+ * module's criticality and confidence into a low/medium/high/critical level with
+ * a rationale. Advisory only — does not touch the Policy Engine. Read-only;
+ * derives from the existing index (run `archon index` first).
+ */
+export async function cmdRisk(rt: Runtime, target: string, opts: { json?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(null));
+    else console.log('risk: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const all = store.allSymbols();
+    const seeds = all.filter((s) => s.file === target).map((s) => s.name);
+    const indexed = store.allFileHashes().some((f) => f.path === target);
+    if (!indexed) {
+      if (opts.json) console.log(JSON.stringify(null));
+      else console.log(`risk: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
+      return;
+    }
+
+    const radius = seeds.length > 0 ? await new SymbolGraph(store).blastRadius(seeds) : { symbols: seeds, files: [] };
+    const dependents = radius.symbols.filter((s) => !seeds.includes(s)).length;
+
+    const files = store.allFileHashes();
+    const model = store.loadModuleIntelligence() ?? inferBoundaries(files, store.loadFileEdges());
+    const moduleName = moduleOf(target);
+    const definedFiles = new Set(all.map((s) => s.file));
+    const risk: FileRisk = scoreRisk({
+      file: target,
+      module: model.modules.find((m) => m.name === moduleName),
+      blastRadius: dependents,
+      confidence: moduleConfidence(moduleName, files, definedFiles),
+    });
+
+    if (opts.json) console.log(JSON.stringify(risk, null, 2));
+    else console.log(formatRisk(risk));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Temporal evolution (M15): rank modules by churn × coupling over recent git
+ * history and flag those trending toward god-object status. Read-only — reads
+ * `git log` plus the existing index (run `archon index` first); the boundary
+ * model comes from the persisted intelligence layer, falling back to a live
+ * derivation.
+ */
+export async function cmdEvolution(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (): EvolutionModel => ({ hotspots: [], godTrending: [], commitsAnalyzed: 0 });
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('evolution: no index yet — run `archon index` first');
+    return;
+  }
+  const { indexer, store, close } = await rt.indexer();
+  try {
+    const model = store.loadModuleIntelligence() ?? inferBoundaries(store.allFileHashes(), store.loadFileEdges());
+    const evo = analyzeEvolution(await indexer.commitHistory(), model);
+    if (opts.json) console.log(JSON.stringify(evo, null, 2));
+    else console.log(formatEvolution(evo));
+  } finally {
+    close();
+  }
+}
+
+/**
+ * Decision intelligence (M16): query the repo's ADRs as decision memory, or
+ * `propose` a draft ADR for the latest significant change. With no argument it
+ * lists every recorded decision; `<query>` filters by substring; `propose`
+ * drafts (never files) an ADR for a human to complete. Read-only — ADRs are read
+ * from `docs/adr/`; `init` is what ingests them into recallable semantic memory.
+ */
+export async function cmdDecisions(rt: Runtime, arg?: string): Promise<void> {
+  if (arg === 'propose') return cmdAdrPropose(rt);
+  const decisions = await loadDecisions(rt.root);
+  const filtered = arg ? decisions.filter((d) => matchesQuery(d, arg)) : decisions;
+  console.log(formatDecisions(filtered, arg));
+}
+
+/** Parse every numbered ADR under `docs/adr/`, ordered by id. Empty when none exist. */
+async function loadDecisions(root: string): Promise<Decision[]> {
+  const adrDir = join(root, 'docs', 'adr');
+  if (!existsSync(adrDir)) return [];
+  const files = (await readdir(adrDir)).filter((f) => /^\d{1,4}.*\.md$/.test(f)).sort();
+  const decisions = await Promise.all(
+    files.map(async (f) => parseAdr(await readFile(join(adrDir, f), 'utf8'), posix.join('docs/adr', f))),
+  );
+  return decisions;
+}
+
+/**
+ * Propose a draft ADR for the latest commit when it is significant (touches a
+ * load-bearing module or is broad). Emits a `proposed`-status template to stdout
+ * for a human to complete and file — it never writes an ADR (the proposed →
+ * accepted gate stays human). Read-only; needs an index for module criticality.
+ */
+async function cmdAdrPropose(rt: Runtime): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('decisions: no index yet — run `archon index` first');
+    return;
+  }
+  const { indexer, store, close } = await rt.indexer();
+  try {
+    const [latest] = await indexer.commitHistory(1);
+    if (!latest) {
+      console.log('decisions: no commits to assess');
+      return;
+    }
+    const model = store.loadModuleIntelligence() ?? inferBoundaries(store.allFileHashes(), store.loadFileEdges());
+    const sig = assessSignificance(latest, model);
+    if (!sig.significant) {
+      console.log(`decisions: latest change (${latest.hash.slice(0, 8)}) is ${sig.reason} — no ADR proposed`);
+      return;
+    }
+    const decisions = await loadDecisions(rt.root);
+    const maxId = decisions.reduce((m, d) => Math.max(m, Number(d.id) || 0), 0);
+    const nextId = String(maxId + 1).padStart(4, '0');
+    console.log(`decisions: latest change is significant (${sig.reason}) — proposed ADR draft:\n`);
+    console.log(proposeAdr(nextId, latest, sig, new Date().toISOString().slice(0, 10)));
+  } finally {
+    close();
+  }
+}
+
+/** Assemble the violation detector's inputs from an open index store. */
+function buildViolationInput(store: IndexStore): Parameters<typeof detectViolations>[0] {
+  const files = store.allFileHashes();
+  const edges = store.loadFileEdges();
+  const model = store.loadModuleIntelligence() ?? inferBoundaries(files, edges);
+  return { model, files, edges, definedFiles: new Set(store.allSymbols().map((s) => s.file)) };
+}
+
 type IndexedSymbol = { name: string; file: string; kind: string };
 
 /**
@@ -786,11 +1007,16 @@ export interface DoctorReport {
   budgets: { perTaskUsd: number; globalDailyUsd: number; contextTokensMax: number };
   state: { index: boolean; memory: boolean; journal: boolean };
   plugins: number;
+  /** Architecture health (M12) + its trend over recorded scans (M15), or null when there is no index. */
+  health: { score: number; high: number; medium: number; low: number; trend: number | null } | null;
+  /** Temporal evolution forecast (M15), or null when there is no index. */
+  evolution: { commitsAnalyzed: number; godTrending: number; topHotspot: string | null } | null;
 }
 
 export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
   const { config } = rt;
   const present = (rel: string): boolean => existsSync(join(rt.root, rel));
+  const arch = await assessArchitecture(rt);
   const report: DoctorReport = {
     root: rt.root,
     node: process.version,
@@ -808,6 +1034,8 @@ export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Pro
       journal: present(config.paths.journal),
     },
     plugins: (await rt.pluginHost()).list().length,
+    health: arch.health,
+    evolution: arch.evolution,
   };
 
   if (opts.json) {
@@ -840,6 +1068,55 @@ export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Pro
   console.log(`    - journal: ${mark(report.state.journal)}`);
 
   console.log(`  plugins:   ${report.plugins} loaded`);
+
+  if (report.health === null) {
+    console.log('  health:    no index — run `archon index` for an architecture-health score');
+  } else {
+    const h = report.health;
+    const trend = h.trend === null ? '' : `  trend ${trendArrow(h.trend)} ${h.trend >= 0 ? '+' : ''}${h.trend} over last 2 scans`;
+    console.log(`  health:    ${h.score}/100  (${h.high} high · ${h.medium} medium · ${h.low} low)${trend} — see \`archon violations\``);
+  }
+
+  if (report.evolution !== null && report.evolution.commitsAnalyzed > 0) {
+    const e = report.evolution;
+    const summary = e.godTrending === 0 ? 'none' : `${e.godTrending} (top: ${e.topHotspot}) — see \`archon evolution\``;
+    console.log(`  evolution: ${e.commitsAnalyzed} commits · trending toward god-object: ${summary}`);
+  }
+}
+
+/** ▲ rising health, ▼ falling, ▶ flat — for the doctor trend line. */
+const trendArrow = (delta: number): string => (delta > 0 ? '▲' : delta < 0 ? '▼' : '▶');
+
+/**
+ * Architecture health + temporal evolution from the index (M12 + M15), or
+ * null/null when no index exists yet. Reads `git log` for churn; shares one
+ * open store so doctor opens the index once.
+ */
+async function assessArchitecture(
+  rt: Runtime,
+): Promise<{ health: DoctorReport['health']; evolution: DoctorReport['evolution'] }> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) return { health: null, evolution: null };
+  const { indexer, store, close } = await rt.indexer();
+  try {
+    const { healthScore, countsBySeverity } = detectViolations(buildViolationInput(store));
+    const history = store.loadHealthHistory();
+    const trend =
+      history.length >= 2 ? history[history.length - 1].score - history[history.length - 2].score : null;
+
+    const model = store.loadModuleIntelligence() ?? inferBoundaries(store.allFileHashes(), store.loadFileEdges());
+    const evo = analyzeEvolution(await indexer.commitHistory(), model);
+    return {
+      health: { score: healthScore, ...countsBySeverity, trend },
+      evolution: {
+        commitsAnalyzed: evo.commitsAnalyzed,
+        godTrending: evo.godTrending.length,
+        topHotspot: evo.godTrending[0]?.name ?? null,
+      },
+    };
+  } finally {
+    close();
+  }
 }
 
 /**

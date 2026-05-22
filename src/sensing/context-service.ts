@@ -1,6 +1,18 @@
 import type { ComputeCore } from '../core/compute';
 import type { RankedSymbol, RepoMapInput, Task } from '../core/types';
+import { type IntentScope, resolveScope } from './context-scope';
+import { SymbolGraph } from './symbol-graph';
 import type { IndexStore } from './store';
+
+/** Provenance of an intent-scoped packet (M17): why these symbols, not the repo. */
+export interface ContextScope {
+  /** Bounded-context modules the task was scoped to. */
+  boundedContext: string[];
+  /** Goal terms that resolved to code. */
+  matchedTerms: string[];
+  /** Count of symbols in the change-impact surface (blast radius of the seeds). */
+  impactSurface: number;
+}
 
 /** Result of assembling a working set. `tokens` is guaranteed ≤ the budget. */
 export interface AssembledContext {
@@ -12,6 +24,8 @@ export interface AssembledContext {
   included: string[];
   /** True when served from the in-memory cache (repo state + budget unchanged). */
   cached: boolean;
+  /** Intent scope when the goal resolved to a bounded context; null on a global fallback. */
+  scope: ContextScope | null;
 }
 
 /** Rough token estimate; deliberately conservative (over-counts, never under). */
@@ -49,9 +63,21 @@ export class ContextService {
     const ranked = await this.core.rankRepoMap(graph);
     const meta = new Map(symbols.map((s) => [s.name, { file: s.file, kind: s.kind }]));
 
-    const built = this.renderWithinBudget(task, ranked, meta, budgetTokens);
+    // M17: decompose intent → bounded-context scope + change-impact surface.
+    // When the goal names nothing in the repo, fall back to the global repo-map.
+    const scope = resolveScope({ goal: task.goal, symbols, fileEdges: this.store.loadFileEdges() });
+    const priority =
+      scope.seedSymbols.length > 0 ? await this.priorityIds(scope) : undefined;
+
+    const built = this.renderWithinBudget(task, ranked, meta, budgetTokens, scope, priority);
     this.cache.set(key, built);
     return { ...built, cached: false };
+  }
+
+  /** Symbols to render first: the in-scope working set ∪ the seeds' blast radius (impact surface). */
+  private async priorityIds(scope: IntentScope): Promise<{ ids: Set<string>; impact: number }> {
+    const impact = (await new SymbolGraph(this.store).blastRadius(scope.seedSymbols)).symbols;
+    return { ids: new Set([...scope.scopedSymbols, ...impact]), impact: impact.length };
   }
 
   /**
@@ -72,17 +98,35 @@ export class ContextService {
     ranked: RankedSymbol[],
     meta: Map<string, { file: string; kind: string }>,
     budgetTokens: number,
+    scope: IntentScope,
+    priority?: { ids: Set<string>; impact: number },
   ): Omit<AssembledContext, 'cached'> {
-    const header = `# Repo map for: ${task.goal}\n`;
+    const scoped = priority !== undefined;
+    const provenance: ContextScope | null = scoped
+      ? { boundedContext: scope.scopeModules, matchedTerms: scope.matchedTerms, impactSurface: priority.impact }
+      : null;
+
+    const header = scoped
+      ? `# Context for: ${task.goal}\n` +
+        `# bounded context: ${scope.scopeModules.join(', ')} (matched: ${scope.matchedTerms.join(', ')}) · impact surface: ${priority.impact} symbol(s)\n`
+      : `# Repo map for: ${task.goal}\n`;
     let tokens = estimateTokens(header);
-    if (tokens > budgetTokens) return { text: '', tokens: 0, included: [] };
+    if (tokens > budgetTokens) return { text: '', tokens: 0, included: [], scope: provenance };
+
+    // Render in-scope/impact symbols first (highest rank within each tier), then
+    // backfill with the global ranking until the budget is exhausted.
+    const inScope = (id: string): boolean => scoped && priority.ids.has(id);
+    const order = scoped
+      ? [...ranked].sort((a, b) => Number(inScope(b.id)) - Number(inScope(a.id)))
+      : ranked;
 
     const lines: string[] = [];
     const included: string[] = [];
-    for (const { id, score } of ranked) {
+    for (const { id, score } of order) {
       const m = meta.get(id);
       if (!m) continue;
-      const line = `- ${id} [${m.kind}] (${m.file}) score=${score.toFixed(4)}\n`;
+      const tag = inScope(id) ? '* ' : '  ';
+      const line = `- ${tag}${id} [${m.kind}] (${m.file}) score=${score.toFixed(4)}\n`;
       const cost = estimateTokens(line);
       if (tokens + cost > budgetTokens) break;
       lines.push(line);
@@ -91,6 +135,6 @@ export class ContextService {
     }
 
     const text = header + lines.join('');
-    return { text, tokens: estimateTokens(text), included };
+    return { text, tokens: estimateTokens(text), included, scope: provenance };
   }
 }

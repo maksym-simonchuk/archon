@@ -1,16 +1,20 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
+import { createInterface, moveCursor } from 'node:readline';
 import {
   type AskTurn,
   cmdAsk,
+  cmdBoundaries,
   cmdCost,
+  cmdDecisions,
   cmdDoctor,
+  cmdEvolution,
   cmdExplain,
   cmdImpact,
   cmdIndex,
   cmdMap,
   cmdMemory,
+  cmdMemoryGraph,
   cmdMemoryList,
   cmdModel,
   cmdPath,
@@ -19,19 +23,21 @@ import {
   cmdPolicy,
   cmdPromote,
   cmdPromotions,
+  cmdRisk,
   cmdRun,
   cmdSh,
   cmdSkills,
   cmdStatus,
   cmdTool,
+  cmdViolations,
   extractFlag,
-  plannerLabel,
 } from './commands';
 import { buildRuntime, type Runtime } from './runtime';
 
-const PROMPT = 'archon› ';
 const HISTORY_FILE = 'shell_history';
 const HISTORY_MAX = 1000;
+/** Width of the framing rule, capped so it stays readable on wide terminals. */
+const RULE_WIDTH = 60;
 /** Cap on prior /ask turns fed back into the model — bounds prompt growth + cost. */
 const ASK_CONTEXT_TURNS = 8;
 
@@ -53,6 +59,11 @@ const COMMANDS = [
   '/impact',
   '/explain',
   '/map',
+  '/boundaries',
+  '/violations',
+  '/risk',
+  '/evolution',
+  '/decisions',
   '/path',
   '/status',
   '/cost',
@@ -79,12 +90,17 @@ const SHELL_HELP = `commands:
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
+  /boundaries      bounded contexts — coupling, instability, god modules, cycles
+  /violations      architecture-health findings ranked by severity × impact
+  /risk <file>     change-risk level for a file (blast × criticality × confidence)
+  /evolution       churn × coupling over git history — modules trending toward god-object
+  /decisions [query|propose]  ADR decision memory · propose: draft an ADR for the latest change
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
-  /memory [list [tier]|goal]  list: stored records · goal: recall · none: candidates
+  /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
   /skills [name]   list skill playbooks · <name>: print one
@@ -96,18 +112,84 @@ const SHELL_HELP = `commands:
   <text>           shorthand for /plan <text>
 
 tip: @path in any goal or question attaches that file's contents — read through
-the policy broker, so secrets (.env, keys) are refused, never sent to the model.`;
+the policy broker, so secrets (.env, keys) are refused, never sent to the model.
+tip: as you type, a dimmed suggestion (recent history / commands) trails the
+cursor — press → to accept it, Tab to complete a command.`;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+// Zero-dependency ANSI styling: active only on a real TTY and when NO_COLOR is
+// unset (https://no-color.org), so piped/non-interactive output stays plain.
+const useColor = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
+const sgr =
+  (code: number) =>
+  (s: string): string =>
+    useColor ? `\x1b[${code}m${s}\x1b[0m` : s;
+const dim = sgr(2);
+const cyan = sgr(36);
+const bold = sgr(1);
+
+const PROMPT_TEXT = 'archon› '; // visible width (8) — drives the ghost-text wrap guard
+const PROMPT = cyan(PROMPT_TEXT);
+const rule = (): string => dim('─'.repeat(RULE_WIDTH));
+
+/** One-line status the TUI reprints above each prompt: profile · planner · live session spend. */
+function statusLine(rt: Runtime): string {
+  const planner = rt.llmPlanning ? 'llm' : 'scaffold';
+  return dim(`archon  ${rt.config.profile} · ${planner} · $${rt.router.spent.toFixed(4)}/task`);
+}
+
+/** Memory tiers offered after `/memory list ` — mirrors MEMORY_TIERS in commands.ts. */
+const MEMORY_COMPLETION_TIERS = ['episodic', 'semantic', 'procedural'] as const;
+
 /**
- * readline completer: when the line is the start of a slash command, offer the
- * matching commands; for anything else (e.g. typing a goal) offer nothing so
- * the input isn't disturbed. Returns the `[completions, line]` tuple readline
- * expects. Exported so the completion logic is testable without a TTY.
+ * Static argument completions for the few commands with a fixed subcommand
+ * vocabulary. Returns the full candidate *lines* (so readline can append the
+ * tail) for the token currently being completed; `words` is the line split on
+ * whitespace, `words[0]` the command. Dynamic names (skills, tools, ids) are out
+ * of scope — those need the runtime, which the pure completer deliberately omits.
+ */
+function argCandidates(head: string, words: string[]): string[] {
+  if (head === '/memory') {
+    if (words.length === 2) return ['/memory list', '/memory graph'];
+    if (words.length === 3 && words[1] === 'list')
+      return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
+  }
+  if (head === '/policy' && words.length === 2) return ['/policy check'];
+  if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
+  return [];
+}
+
+/**
+ * readline completer. The first word completes to a matching slash command; once
+ * a known command has a trailing argument, its fixed subcommands/values are
+ * offered (e.g. `/memory list`, its tiers, `/policy check`). Anything else (a
+ * bare goal, an unknown command's args) offers nothing so the input isn't
+ * disturbed. Returns the `[completions, line]` tuple readline expects — the line
+ * is the match substring, and candidates are full lines, so readline appends only
+ * the missing tail. Exported so the completion logic is testable without a TTY.
  */
 export function completeShell(line: string): [string[], string] {
-  return [COMMANDS.filter((c) => c.startsWith(line)), line];
+  const words = line.split(/\s+/);
+  // First word (no argument yet) → complete the command name itself.
+  if (words.length <= 1) return [COMMANDS.filter((c) => c.startsWith(line)), line];
+  // Subsequent words → offer the command's static argument vocabulary, if any.
+  return [argCandidates(words[0], words).filter((c) => c.startsWith(line)), line];
+}
+
+/**
+ * Inline ghost-text suggestion for the current input `line`: the full line the
+ * user most likely intends, drawn dimmed after the cursor and accepted with `→`.
+ * Prefers the most-recent matching history entry (so a re-run is one keystroke),
+ * then falls back to a matching command name. Returns the *whole* suggested line
+ * (the renderer slices off the typed prefix), or undefined when nothing strictly
+ * extends what's typed. `history` is most-recent-first (readline's order). Pure +
+ * exported so the matching is testable without a TTY.
+ */
+export function suggestLine(line: string, history: readonly string[]): string | undefined {
+  if (!line) return undefined; // never suggest on an empty prompt
+  const extends_ = (c: string): boolean => c.length > line.length && c.startsWith(line);
+  return history.find(extends_) ?? COMMANDS.find(extends_);
 }
 
 /** Load up to HISTORY_MAX prior input lines (most-recent-first) to seed readline. */
@@ -196,6 +278,22 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/map':
       await cmdMap(rt);
       return true;
+    case '/boundaries':
+      await cmdBoundaries(rt);
+      return true;
+    case '/violations':
+      await cmdViolations(rt);
+      return true;
+    case '/risk':
+      if (arg) await cmdRisk(rt, arg);
+      else console.log('usage: /risk <file>');
+      return true;
+    case '/evolution':
+      await cmdEvolution(rt);
+      return true;
+    case '/decisions':
+      await cmdDecisions(rt, arg);
+      return true;
     case '/path': {
       const [from, to] = rest;
       if (from && to) await cmdPath(rt, from, to);
@@ -217,6 +315,7 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/memory': {
       const [sub, ...more] = rest;
       if (sub === 'list') await cmdMemoryList(rt, more[0]); // /memory list [tier]
+      else if (sub === 'graph') await cmdMemoryGraph(rt); // /memory graph → intelligence layer
       else if (arg) await cmdMemory(rt, arg); // /memory <goal> → recall
       else await cmdPromotions(rt); // /memory → promotion candidates
       return true;
@@ -259,11 +358,14 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
 }
 
 /**
- * Interactive REPL — the `archon` no-arg surface. Builds one Runtime for the
- * whole session (so the journal, memory, and provider cache persist across
- * commands) and drives it line-by-line via readline. Zero new dependencies:
- * history (up/down) and line editing come from `node:readline`. Exits on /exit,
- * /quit, or EOF (Ctrl-D), closing the runtime.
+ * Interactive TUI — the sole `archon` surface (one-shot subcommands were
+ * removed). Builds one Runtime for the whole session (so the journal, memory,
+ * and provider cache persist across commands) and drives it line-by-line via
+ * readline. Zero new dependencies: history (up/down), line editing, and
+ * tab-completion come from `node:readline`; the framing is plain ANSI, gated on
+ * a TTY. A status line (profile · planner · live spend) and a rule are reprinted
+ * above each prompt, so the last command's output sits framed between them.
+ * Exits on /exit, /quit, or EOF (Ctrl-D), closing the runtime.
  */
 export async function startShell(): Promise<void> {
   const rt = await buildRuntime(process.cwd());
@@ -292,21 +394,68 @@ export async function startShell(): Promise<void> {
     else rl.close();
   });
 
-  console.log('archon interactive shell — /help for commands, /exit to quit');
-  console.log(plannerLabel(rt.llmPlanning));
-  rl.prompt();
+  // ── Inline ghost-text autosuggest ──────────────────────────────────────────
+  // True while a command runs, so keystrokes during execution don't paint a
+  // suggestion over command output. The keypress handler fires AFTER readline's
+  // own (we register later), so rl.line/rl.cursor are already updated.
+  let busy = false;
+  // Repaint the dimmed suggestion after the cursor, then move the cursor back to
+  // its logical spot. readline clears to end-of-line on its next refresh, so the
+  // ghost erases itself on the following keystroke — we only ever draw. Cosmetic:
+  // gated on a colour TTY, suppressed when busy / mid-line / when it would wrap.
+  const paintGhost = (): void => {
+    if (busy || !useColor) return;
+    try {
+      const { line, cursor } = rl;
+      if (!line || cursor !== line.length) return; // only at end-of-line
+      const suggestion = suggestLine(line, history);
+      if (!suggestion) return;
+      const tail = suggestion.slice(line.length);
+      if (PROMPT_TEXT.length + line.length + tail.length >= (process.stdout.columns ?? 80)) return; // would wrap
+      process.stdout.write(dim(tail));
+      moveCursor(process.stdout, -tail.length, 0);
+    } catch {
+      // Autosuggest is cosmetic; a render glitch must never break line editing.
+    }
+  };
+  process.stdin.on('keypress', (_str: string | undefined, key: { name?: string } | undefined) => {
+    // `→` at end-of-line accepts the suggestion: write the missing tail as if
+    // typed (readline does nothing on right-arrow at end, so there's no conflict).
+    if (key?.name === 'right' && !busy && rl.cursor === rl.line.length) {
+      const suggestion = suggestLine(rl.line, history);
+      if (suggestion) {
+        rl.write(suggestion.slice(rl.line.length));
+        return; // the insert redraws; next keystroke repaints the next ghost
+      }
+    }
+    paintGhost();
+  });
+
+  // Reprint the status line + rule, then the prompt — so each command's output
+  // ends up framed between this rule and the next status line.
+  const frame = (): void => {
+    console.log(`\n${statusLine(rt)}`);
+    console.log(rule());
+    rl.prompt();
+  };
+
+  console.log(bold('archon') + dim(' — interactive TUI · /help for commands, /exit to quit'));
+  frame();
 
   try {
     for await (const line of rl) {
       const input = line.trim();
       if (input) {
+        busy = true; // suppress ghost-text painting while a command runs
         try {
           if (!(await dispatch(rt, input, session))) break;
         } catch (e) {
           console.error(`[archon] ${msg(e)}`);
+        } finally {
+          busy = false;
         }
       }
-      rl.prompt();
+      frame();
     }
   } finally {
     rl.close();
