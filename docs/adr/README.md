@@ -19,3 +19,4 @@ decision = add a new ADR and mark the old one `superseded`.
 | 0009 | Plugin ABI v0 (five hooks)                         | accepted |
 | 0010 | Safe-by-default profiles + design-before-act       | accepted |
 | 0011 | Rust → WASM compute core for hot paths             | accepted |
+| 0012 | Provider plugins as a cap-gated router fallback    | accepted |
