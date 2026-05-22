@@ -18,6 +18,7 @@ import {
   cmdSkills,
   cmdStatus,
   cmdTool,
+  extractFlag,
 } from './commands';
 import { cmdInit } from './init';
 import { buildRuntime, type Runtime } from './runtime';
@@ -29,8 +30,8 @@ Usage:
   archon                  Launch the interactive shell
   archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
-  archon plan <goal>      Produce a plan tree — no writes               (M6)
-  archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
+  archon plan [--skill <name>] <goal>   Produce a plan tree — no writes (M6)
+  archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
   archon status [--json]  Show task journal + budgets                   (M0)
   archon doctor [--json]  Report runtime readiness (planner/keys/state)
@@ -74,12 +75,18 @@ async function main(argv: string[]): Promise<void> {
       return cmdInit(process.cwd());
     case 'index':
       return withRuntime(cmdIndex);
-    case 'plan':
-      if (!goal) return usageError('plan <goal>');
-      return withRuntime((rt) => cmdPlan(rt, goal));
-    case 'run':
-      if (!goal) return usageError('run <goal>');
-      return withRuntime((rt) => cmdRun(rt, goal));
+    case 'plan': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (!g) return usageError('plan [--skill <name>] <goal>');
+      return withRuntime((rt) => cmdPlan(rt, g, { skill }));
+    }
+    case 'run': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (!g) return usageError('run [--skill <name>] <goal>');
+      return withRuntime((rt) => cmdRun(rt, g, { skill }));
+    }
     case 'ask':
       if (!goal) return usageError('ask <question>');
       return withRuntime(async (rt) => {

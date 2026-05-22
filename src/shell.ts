@@ -17,6 +17,7 @@ import {
   cmdSkills,
   cmdStatus,
   cmdTool,
+  extractFlag,
   plannerLabel,
 } from './commands';
 import { buildRuntime, type Runtime } from './runtime';
@@ -57,8 +58,8 @@ const COMMANDS = [
 ] as const;
 
 const SHELL_HELP = `commands:
-  /plan <goal>     plan a task — no writes
-  /run <goal>      plan → act → verify under a worktree transaction
+  /plan [--skill <name>] <goal>   plan a task — no writes
+  /run  [--skill <name>] <goal>   plan → act → verify under a worktree transaction
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
@@ -130,12 +131,20 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/help':
       console.log(SHELL_HELP);
       return true;
-    case '/plan':
-      if (needGoal()) await cmdPlan(rt, arg);
+    case '/plan': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (g) await cmdPlan(rt, g, { skill });
+      else console.log('usage: /plan [--skill <name>] <goal>');
       return true;
-    case '/run':
-      if (needGoal()) await cmdRun(rt, arg);
+    }
+    case '/run': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (g) await cmdRun(rt, g, { skill });
+      else console.log('usage: /run [--skill <name>] <goal>');
       return true;
+    }
     case '/ask':
       if (needGoal()) {
         // Publish a controller for the SIGINT handler, then always retract it so

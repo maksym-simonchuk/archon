@@ -65,6 +65,21 @@ export interface AskTurn {
   answer: string;
 }
 
+/**
+ * Lift `--<flag> <value>` out of an argv token list, returning the value (if
+ * present) and the surviving tokens. A dangling `--<flag>` with no following
+ * value is dropped (treated as absent). Used to peel `--skill <name>` off
+ * `plan`/`run` before the remainder is joined into the goal — shared by the CLI
+ * and the shell so both surfaces parse a flag identically.
+ */
+export function extractFlag(tokens: string[], flag: string): { value?: string; rest: string[] } {
+  const i = tokens.indexOf(flag);
+  if (i === -1) return { rest: tokens };
+  const value = tokens[i + 1];
+  if (value === undefined) return { rest: tokens.slice(0, i) }; // dangling flag → drop it
+  return { value, rest: [...tokens.slice(0, i), ...tokens.slice(i + 2)] };
+}
+
 const FILE_REF = /(?:^|\s)@(\S+)/g;
 const MAX_FILE_CHARS = 8_000; // cap each attached file so a giant one can't blow the prompt/budget
 const FENCE = '```';
@@ -149,27 +164,49 @@ export async function cmdAsk(
 }
 
 /**
- * Context fed to the planner: any `@file` attachments named in the goal, ahead
- * of the budgeted repo-map. The attachments are read through the broker (so the
- * secret-deny applies) only when an LLM planner is active — the deterministic
- * scaffolder ignores context, so reading files for it would be wasted work and
- * confusing output. Exported for direct testing of the attach/skip branch.
+ * The context block for an explicitly-selected skill `name`: its playbook, framed
+ * as a procedure for the planner to apply — or '' (with a note) when no such
+ * skill is loaded. Selection is always explicit (`--skill`), never automatic:
+ * Archon adapts to the project, so a procedure is imposed only when the operator
+ * asks for it. See ADR-0009.
  */
-export async function planContext(rt: Runtime, task: Task, goal: string): Promise<string> {
-  const attached = rt.llmPlanning ? await attachFiles(rt, extractFileRefs(goal)) : '';
-  return attached + (await rt.context(task));
+async function skillPlaybook(rt: Runtime, name: string): Promise<string> {
+  const skill = (await rt.pluginHost())
+    .list()
+    .find((p): p is SkillPlugin => p.kind === 'skill' && p.manifest.name === name);
+  if (!skill) {
+    console.log(`  ⚠ skill "${name}" not loaded — planning without it (\`archon skills\` lists them)`);
+    return '';
+  }
+  console.log(`  + applying skill "${name}"`);
+  return `# Skill: ${skill.manifest.name}\nApply this playbook where it fits the task:\n${skill.playbook}\n\n`;
 }
 
-export async function cmdPlan(rt: Runtime, goal: string): Promise<void> {
+/**
+ * Context fed to the planner: an explicitly-selected `--skill` playbook (if any),
+ * then any `@file` attachments named in the goal, then the budgeted repo-map.
+ * Attachments are read through the broker (so the secret-deny applies) and the
+ * skill is resolved only when an LLM planner is active — the deterministic
+ * scaffolder ignores context, so doing that work for it would be wasted and
+ * confusing. Exported for direct testing of the attach/skill/skip branches.
+ */
+export async function planContext(rt: Runtime, task: Task, goal: string, skill?: string): Promise<string> {
+  if (!rt.llmPlanning) return rt.context(task); // scaffolder ignores context — skip @file reads + skills
+  const playbook = skill ? await skillPlaybook(rt, skill) : '';
+  const attached = await attachFiles(rt, extractFileRefs(goal));
+  return playbook + attached + (await rt.context(task));
+}
+
+export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, rt.config.profile);
-  printPlan(await rt.planner().plan(task, await planContext(rt, task, goal)));
+  printPlan(await rt.planner().plan(task, await planContext(rt, task, goal, opts.skill)));
 }
 
-export async function cmdRun(rt: Runtime, goal: string): Promise<void> {
+export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, 'trusted');
-  printResults(await rt.loop().run(task, await planContext(rt, task, goal)));
+  printResults(await rt.loop().run(task, await planContext(rt, task, goal, opts.skill)));
 }
 
 export async function cmdIndex(rt: Runtime): Promise<void> {

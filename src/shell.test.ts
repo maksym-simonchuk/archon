@@ -34,7 +34,7 @@ describe('shell dispatch', () => {
     const log = captured();
     try {
       expect(await dispatch(rt, '/help')).toBe(true);
-      expect(text(log)).toContain('/plan <goal>');
+      expect(text(log)).toContain('/plan [--skill <name>] <goal>');
     } finally {
       rt.close();
     }
@@ -92,7 +92,7 @@ describe('shell dispatch', () => {
     const log = captured();
     try {
       expect(await dispatch(rt, '/plan')).toBe(true);
-      expect(text(log)).toContain('usage: /plan <goal>');
+      expect(text(log)).toContain('usage: /plan [--skill <name>] <goal>');
     } finally {
       rt.close();
     }

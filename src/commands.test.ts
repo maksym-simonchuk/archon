@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cmdPromote, cmdPromotions } from './commands';
+import { cmdPromote, cmdPromotions, extractFlag } from './commands';
 import { buildRuntime, type Runtime } from './runtime';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
@@ -64,5 +64,27 @@ describe('memory promotion commands (M5 human gate)', () => {
     await cmdPromotions(rt); // never opened memory()
     expect(text(log)).toContain('empty (no runs yet)');
     rt.close();
+  });
+});
+
+describe('extractFlag (shared --skill parsing for plan/run)', () => {
+  it('lifts a flag value out of the token stream, leaving the goal intact', () => {
+    expect(extractFlag(['--skill', 'refactor', 'add', 'a', 'widget'], '--skill')).toEqual({
+      value: 'refactor',
+      rest: ['add', 'a', 'widget'],
+    });
+    // a flag in the middle is spliced out cleanly, value and all
+    expect(extractFlag(['fix', '--skill', 'debug', 'the', 'bug'], '--skill')).toEqual({
+      value: 'debug',
+      rest: ['fix', 'the', 'bug'],
+    });
+  });
+
+  it('returns the tokens unchanged when the flag is absent', () => {
+    expect(extractFlag(['add', 'a', 'widget'], '--skill')).toEqual({ rest: ['add', 'a', 'widget'] });
+  });
+
+  it('drops a dangling flag that has no following value', () => {
+    expect(extractFlag(['add', 'a', 'widget', '--skill'], '--skill')).toEqual({ rest: ['add', 'a', 'widget'] });
   });
 });
