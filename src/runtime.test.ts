@@ -54,7 +54,7 @@ describe('buildRuntime (composition root)', () => {
   it('activates the LLM planner when a provider is configured and its key is present', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
     const runtime = await buildRuntime(
-      await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5'] }] }),
+      await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] }),
     );
     try {
       expect(runtime.llmPlanning).toBe(true);
@@ -66,7 +66,7 @@ describe('buildRuntime (composition root)', () => {
 
   it('folds prior-run memory into the LLM context via the bundled retriever', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
-    const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5'] }] });
+    const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });
     const mem = new MemoryStore(join(root, '.archon/memory.db'));
     mem.write({
       id: 'episode:prev',
@@ -90,7 +90,7 @@ describe('buildRuntime (composition root)', () => {
   it('degrades to the scaffolder when the provider key is absent', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     const runtime = await buildRuntime(
-      await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5'] }] }),
+      await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] }),
     );
     try {
       expect(runtime.llmPlanning).toBe(false);

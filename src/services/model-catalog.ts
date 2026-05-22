@@ -24,8 +24,8 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     costPer1kOutput: 0.015,
     strengths: ['plan', 'reason', 'diff', 'summarize'],
   },
-  'claude-haiku-4-5': {
-    id: 'claude-haiku-4-5',
+  'claude-haiku-4-5-20251001': {
+    id: 'claude-haiku-4-5-20251001',
     provider: 'anthropic',
     contextWindow: 200_000,
     costPer1kInput: 0.0008,

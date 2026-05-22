@@ -47,7 +47,7 @@ describe('archon doctor', () => {
 
   it('flags a configured provider whose key is absent from the env', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', ''); // empty ⇒ treated as missing
-    const rt = await runtimeWith({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5'] }] });
+    const rt = await runtimeWith({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });
     const log = captured();
     await cmdDoctor(rt);
     expect(text(log)).toContain('anthropic: key missing');
