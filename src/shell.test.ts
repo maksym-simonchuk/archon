@@ -63,6 +63,19 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/cost reports session spend against the per-task budget', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/cost')).toBe(true);
+      const out = text(log);
+      expect(out).toContain('cost: $0.0000 this session'); // fresh session, nothing spent
+      expect(out).toContain('task budget 0% used');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('reports an unknown slash command without throwing', async () => {
     const rt = await runtime();
     const log = captured();

@@ -202,6 +202,21 @@ export async function cmdStatus(rt: Runtime, opts: { json?: boolean } = {}): Pro
   }
 }
 
+/**
+ * Session spend so far against the per-task budget that arms the router's
+ * circuit-breaker. Shell-only: the one-shot CLI builds a fresh runtime per
+ * command (spend always zero), so this is meaningful only across a REPL session
+ * where the router — and its running tally — persists.
+ */
+export function cmdCost(rt: Runtime): void {
+  const spent = rt.router.spent;
+  const b = rt.config.budgets;
+  const pct = b.perTaskUsd > 0 ? Math.min(100, Math.round((spent / b.perTaskUsd) * 100)) : 0;
+  console.log(`cost: $${spent.toFixed(4)} this session`);
+  console.log(`  budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day  (task budget ${pct}% used)`);
+  if (spent >= b.perTaskUsd) console.log('  ⚠ per-task budget reached — the router will refuse further calls');
+}
+
 /** Recall prior episodes for a goal, semantically reranked by the bundled retriever. */
 export async function cmdMemory(rt: Runtime, goal: string): Promise<void> {
   const retriever = await rt.retriever('episodic', goal);

@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import {
   type AskTurn,
   cmdAsk,
+  cmdCost,
   cmdDoctor,
   cmdIndex,
   cmdMemory,
@@ -38,6 +39,7 @@ const COMMANDS = [
   '/clear',
   '/index',
   '/status',
+  '/cost',
   '/doctor',
   '/memory',
   '/promote',
@@ -55,6 +57,7 @@ const SHELL_HELP = `commands:
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
   /status          task journal + budgets
+  /cost            session spend vs the per-task budget
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
@@ -137,6 +140,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     case '/status':
       await cmdStatus(rt);
+      return true;
+    case '/cost':
+      cmdCost(rt);
       return true;
     case '/doctor':
       await cmdDoctor(rt);
