@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type { BlastRadius, CapabilityRequest, PolicyVerdict } from '../core/types';
@@ -15,6 +15,12 @@ export interface FsWriteOptions extends PolicyEvalContext {
   /** Files/symbols transitively affected — drives the blast-radius rules. */
   blastRadius?: BlastRadius;
   /** Why the write is happening (recorded in the audit log). */
+  reason: string;
+}
+
+/** Options for a guarded filesystem read. */
+export interface FsReadOptions extends PolicyEvalContext {
+  /** Why the read is happening (recorded in the audit log). */
   reason: string;
 }
 
@@ -82,6 +88,40 @@ export class CapabilityBroker {
     await mkdir(dirname(real), { recursive: true });
     await writeFile(real, content);
     return ok(undefined);
+  }
+
+  /**
+   * Guarded filesystem read: refuses to escape the repo tree (following
+   * symlinks, mirroring `fsWrite`), evaluates the `fs.read` capability, and reads
+   * only on `allow`. This is where the policy's secret-glob denies (dotenv files,
+   * `secrets/` dirs, PEM keys, `id_rsa`) are *enforced* rather than merely
+   * declared — the broad `fs.read` allow can't become a secret-exfil path. A
+   * missing file resolves to a benign `fs.read_failed` Result (an agent-facing
+   * `@file` typo shouldn't throw). The indexer's bulk sensing reads are separate.
+   */
+  async fsRead(target: string, opts: FsReadOptions): Promise<Result<string>> {
+    const real = await realContainedPath(this.repoRoot, target);
+    if (real === null) {
+      const verdict: PolicyVerdict = {
+        decision: 'deny',
+        rule: 'broker.repo_escape',
+        message: `path escapes the repo tree: ${target}`,
+      };
+      this.record({ action: 'fs.read', target, reason: opts.reason }, verdict, opts.taskId);
+      return err({ code: 'policy.deny', message: verdict.message });
+    }
+
+    // Evaluate against the original `target` so the secret globs match by name
+    // (same as fsWrite); `real` is only used to read once allowed.
+    const verdict = await this.request({ action: 'fs.read', target, reason: opts.reason }, opts);
+    if (verdict.decision !== 'allow') {
+      return err({ code: `policy.${verdict.decision}`, message: verdict.message });
+    }
+    try {
+      return ok(await readFile(real, 'utf8'));
+    } catch (e) {
+      return err({ code: 'fs.read_failed', message: e instanceof Error ? e.message : String(e), cause: e });
+    }
   }
 
   /**
