@@ -51,7 +51,7 @@ const COMMANDS = [
 const SHELL_HELP = `commands:
   /plan <goal>     plan a task — no writes
   /run <goal>      plan → act → verify under a worktree transaction
-  /ask <question>  stream a freeform answer (read-only); remembers prior /ask turns
+  /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
   /status          task journal + budgets

@@ -64,23 +64,70 @@ export interface AskTurn {
   answer: string;
 }
 
+const FILE_REF = /(?:^|\s)@(\S+)/g;
+const MAX_FILE_CHARS = 8_000; // cap each attached file so a giant one can't blow the prompt/budget
+const FENCE = '```';
+
+/**
+ * Extract `@path` references from /ask text (deduped, order-preserving). The `@`
+ * only counts at a word boundary, so `user@host` is not a reference, and trailing
+ * sentence punctuation is trimmed so `@src/x.ts.` resolves to `src/x.ts`.
+ */
+export function extractFileRefs(text: string): string[] {
+  const refs: string[] = [];
+  for (const m of text.matchAll(FILE_REF)) {
+    const ref = m[1].replace(/[.,;:!?)\]]+$/, '');
+    if (ref && !refs.includes(ref)) refs.push(ref);
+  }
+  return refs;
+}
+
+/**
+ * Read each `@file` reference through the broker and render it as a fenced
+ * context block. Routing reads through the broker (not raw `fs`) is the whole
+ * point: `@.env` and other secret globs are denied by policy, so a file destined
+ * for an external LLM prompt can't become an exfil path; repo-escape is blocked
+ * too. Each decision is surfaced to the user, and oversized files are truncated.
+ */
+async function attachFiles(rt: Runtime, refs: string[]): Promise<string> {
+  if (refs.length === 0) return '';
+  const broker = rt.brokerAt(rt.root);
+  const blocks: string[] = [];
+  for (const ref of refs) {
+    const r = await broker.fsRead(ref, { reason: 'ask: @file context' });
+    if (r.ok) {
+      const body = r.value.length > MAX_FILE_CHARS ? `${r.value.slice(0, MAX_FILE_CHARS)}\n…(truncated)\n` : r.value;
+      blocks.push(`# File: ${ref}\n${FENCE}\n${body}${FENCE}`);
+      console.log(`  + attached @${ref} (${r.value.length} chars)`);
+    } else {
+      const why = r.error.message ?? r.error.code;
+      blocks.push(`# File: ${ref}\n(unavailable: ${why})`);
+      console.log(`  ⚠ skipped @${ref}: ${why}`);
+    }
+  }
+  return `Attached files:\n${blocks.join('\n\n')}\n\n`;
+}
+
 /**
  * Stream a freeform answer from the provider, token by token (the shell's
  * "typing" feel). Read-only: it routes through `summarize` (a cheap model) and
- * proposes no effects, so nothing is broker-gated. Requires an LLM provider —
- * the offline scaffolder cannot stream. Prior turns (the shell's session
- * transcript) are woven into the prompt so the conversation carries context; the
- * one-shot CLI passes none. Returns the full answer so the caller can append it
- * to the transcript (empty string when no provider is configured).
+ * proposes no effects. Requires an LLM provider — the offline scaffolder cannot
+ * stream. Prior turns (the shell's session transcript) are woven into the prompt
+ * so the conversation carries context; the one-shot CLI passes none. `@path`
+ * tokens in the question pull file contents into the prompt — read through the
+ * broker, so secrets are denied. Returns the full answer so the caller can append
+ * it to the transcript (empty string when no provider is configured).
  */
 export async function cmdAsk(rt: Runtime, question: string, history: readonly AskTurn[] = []): Promise<string> {
   if (!rt.llmPlanning) {
     console.log('ask: no LLM provider configured — set a provider key (see `archon doctor`)');
     return '';
   }
+  const attached = await attachFiles(rt, extractFileRefs(question));
   const prior = history.map((t) => `Q: ${t.question}\nA: ${t.answer}`).join('\n\n');
   const prompt =
     'Answer concisely for an engineer working in this repository.\n\n' +
+    attached +
     (prior ? `Conversation so far:\n${prior}\n\n` : '') +
     `Question: ${question}\n`;
   const { modelId, text, costUsd } = await rt.router.streamComplete(

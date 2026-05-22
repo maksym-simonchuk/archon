@@ -1,10 +1,24 @@
+import { readFileSync } from 'node:fs';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type AskTurn, cmdAsk } from './commands';
+import { type AskTurn, cmdAsk, extractFileRefs } from './commands';
 import type { ModelSpec } from './core/types';
+import { AuditLog } from './effecting/audit-log';
+import { CapabilityBroker } from './effecting/capability-broker';
+import { loadPolicy, PolicyEngine } from './effecting/policy-engine';
 import type { Runtime } from './runtime';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 
-afterEach(() => vi.restoreAllMocks());
+const policyDoc = loadPolicy(readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8'));
+
+let dir: string | undefined;
+afterEach(async () => {
+  vi.restoreAllMocks();
+  if (dir) await rm(dir, { recursive: true, force: true });
+  dir = undefined;
+});
 
 const model: ModelSpec = {
   id: 'm',
@@ -36,9 +50,17 @@ function streamingClient(): { client: ProviderClient; lastPrompt: () => string }
   return { client, lastPrompt: () => seen };
 }
 
-// cmdAsk only reads `llmPlanning` + `router`; build the smallest shape that satisfies it.
+// cmdAsk reads `llmPlanning` + `router` (and, when the question has @refs,
+// `brokerAt` + `root`); build the smallest shape that satisfies it.
 const fakeRt = (llmPlanning: boolean, router: ProviderRouter): Runtime =>
   ({ llmPlanning, router }) as unknown as Runtime;
+const brokerRt = (router: ProviderRouter, root: string): Runtime =>
+  ({
+    llmPlanning: true,
+    router,
+    root,
+    brokerAt: (cwd: string) => new CapabilityBroker(new PolicyEngine(policyDoc, 'safe'), new AuditLog(), cwd),
+  }) as unknown as Runtime;
 const muteStdout = () =>
   vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
 
@@ -78,5 +100,46 @@ describe('cmdAsk (streaming /ask)', () => {
 
     expect(answer).toBe('');
     expect(log.mock.calls.flat().join('\n')).toContain('no LLM provider configured');
+  });
+});
+
+describe('extractFileRefs', () => {
+  it('pulls @path tokens, deduped and order-preserving', () => {
+    expect(extractFileRefs('explain @src/a.ts and @src/b.ts')).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(extractFileRefs('@x then @x again')).toEqual(['x']); // deduped
+  });
+
+  it('ignores a non-boundary @ (so emails are not refs) and trims trailing punctuation', () => {
+    expect(extractFileRefs('mail me at user@host.com')).toEqual([]);
+    expect(extractFileRefs('see @src/x.ts, and @src/y.ts.')).toEqual(['src/x.ts', 'src/y.ts']);
+  });
+});
+
+describe('cmdAsk @file context', () => {
+  it('reads an @file through the broker and injects its contents into the prompt', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-ask-'));
+    await writeFile(join(dir, 'note.txt'), 'the answer is 42');
+    muteStdout();
+    vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { client, lastPrompt } = streamingClient();
+
+    await cmdAsk(brokerRt(new ProviderRouter([model], [client]), dir), 'what does @note.txt say?');
+
+    expect(lastPrompt()).toContain('Attached files:');
+    expect(lastPrompt()).toContain('the answer is 42');
+  });
+
+  it('refuses an @secret file: contents never reach the prompt, the user is told', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-ask-'));
+    await writeFile(join(dir, '.env'), 'OPENAI_API_KEY=sk-do-not-leak');
+    muteStdout();
+    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const { client, lastPrompt } = streamingClient();
+
+    await cmdAsk(brokerRt(new ProviderRouter([model], [client]), dir), 'print @.env');
+
+    expect(lastPrompt()).not.toContain('sk-do-not-leak'); // the secret is never sent to the model
+    expect(lastPrompt()).toContain('unavailable');
+    expect(log.mock.calls.flat().join('\n')).toContain('skipped @.env');
   });
 });
