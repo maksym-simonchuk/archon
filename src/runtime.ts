@@ -34,11 +34,20 @@ import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 import { TaskJournal } from './services/task-journal';
 
-/** Maps a provider id to the env var holding its API key — single source of truth. */
+/** Maps a key-bearing provider id to the env var holding its API key — single source of truth. */
 const PROVIDER_ENV: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
 };
+
+/** Providers that need no API key (a local OpenAI-compatible server reached by base URL). */
+const KEYLESS_PROVIDERS = new Set(['local']);
+/** Default endpoint for the `local` provider (ollama); overridable via env. */
+const LOCAL_BASE_URL = process.env.ARCHON_LOCAL_BASE_URL ?? 'http://localhost:11434/v1';
+
+/** True if Archon ships a client builder for this provider id (with or without a key). */
+const isSupportedProvider = (id: string): boolean => PROVIDER_ENV[id] !== undefined || KEYLESS_PROVIDERS.has(id);
 
 /** The provider's API key from the environment, or undefined if unset/unknown. */
 function envKey(id: string): string | undefined {
@@ -46,13 +55,17 @@ function envKey(id: string): string | undefined {
   return name ? process.env[name] : undefined;
 }
 
-/** Build the concrete provider clients for which an API key is present in env. */
+/** Build the concrete provider clients available in this environment (keyed providers need their key). */
 function buildClients(providers: { id: string }[]): ProviderClient[] {
   const clients: ProviderClient[] = [];
   for (const p of providers) {
-    const key = envKey(p.id);
-    if (!key) continue;
-    if (p.id === 'anthropic' || p.id === 'openai') clients.push(createAiClient(p.id, key));
+    if (p.id === 'anthropic' || p.id === 'openai' || p.id === 'google') {
+      const key = envKey(p.id);
+      if (key) clients.push(createAiClient(p.id, key));
+    } else if (p.id === 'local') {
+      // No key needed; point the OpenAI-compatible client at the local server.
+      clients.push(createAiClient('local', process.env.ARCHON_LOCAL_API_KEY ?? 'local', { baseURL: LOCAL_BASE_URL }));
+    }
   }
   return clients;
 }
@@ -130,8 +143,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const strategy: PlanStrategy = llmPlanning ? new ProviderPlanner(router) : new ScaffoldStrategy();
   const providerStatus = config.providers.map((p) => ({
     id: p.id,
-    supported: PROVIDER_ENV[p.id] !== undefined,
-    keyPresent: Boolean(envKey(p.id)),
+    supported: isSupportedProvider(p.id),
+    // Keyless providers (local) are "ready" without a key; keyed ones need theirs in env.
+    keyPresent: KEYLESS_PROVIDERS.has(p.id) ? true : Boolean(envKey(p.id)),
   }));
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
