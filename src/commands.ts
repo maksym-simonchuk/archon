@@ -139,16 +139,28 @@ export async function cmdAsk(rt: Runtime, question: string, history: readonly As
   return text;
 }
 
+/**
+ * Context fed to the planner: any `@file` attachments named in the goal, ahead
+ * of the budgeted repo-map. The attachments are read through the broker (so the
+ * secret-deny applies) only when an LLM planner is active — the deterministic
+ * scaffolder ignores context, so reading files for it would be wasted work and
+ * confusing output. Exported for direct testing of the attach/skip branch.
+ */
+export async function planContext(rt: Runtime, task: Task, goal: string): Promise<string> {
+  const attached = rt.llmPlanning ? await attachFiles(rt, extractFileRefs(goal)) : '';
+  return attached + (await rt.context(task));
+}
+
 export async function cmdPlan(rt: Runtime, goal: string): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, rt.config.profile);
-  printPlan(await rt.planner().plan(task, await rt.context(task)));
+  printPlan(await rt.planner().plan(task, await planContext(rt, task, goal)));
 }
 
 export async function cmdRun(rt: Runtime, goal: string): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, 'trusted');
-  printResults(await rt.loop().run(task, await rt.context(task)));
+  printResults(await rt.loop().run(task, await planContext(rt, task, goal)));
 }
 
 export async function cmdIndex(rt: Runtime): Promise<void> {

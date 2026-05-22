@@ -65,7 +65,10 @@ const SHELL_HELP = `commands:
   /tool <name> [json]  invoke a tool plugin (policy-gated)
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
-  <text>           shorthand for /plan <text>`;
+  <text>           shorthand for /plan <text>
+
+tip: @path in any goal or question attaches that file's contents — read through
+the policy broker, so secrets (.env, keys) are refused, never sent to the model.`;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
