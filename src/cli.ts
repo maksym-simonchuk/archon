@@ -1,140 +1,69 @@
 #!/usr/bin/env node
-// Archon CLI — command surface for the MVP. `plan` and `run` are live (M6);
-// `index`/`status` remain tracked stubs (see docs/ROADMAP.md).
+// Archon CLI — command surface for the MVP. With no args it launches the
+// interactive shell; otherwise it runs one command and exits. Every command
+// composes through the single runtime root (buildRuntime); the shared command
+// implementations live in src/commands.ts (reused by the shell).
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { CognitionLoop } from './cognition/loop';
-import { Executor } from './cognition/executor';
-import { Planner } from './cognition/planner';
-import { Reflector } from './cognition/reflector';
-import { ScaffoldStrategy } from './cognition/scaffold-strategy';
-import type { CognitivePlan } from './cognition/types';
-import { Verifier } from './cognition/verifier';
-import { loadComputeCore } from './core/compute';
-import type { Profile, StepResult, Task } from './core/types';
-import { AuditLog } from './effecting/audit-log';
-import { CapabilityBroker } from './effecting/capability-broker';
-import { loadPolicy, PolicyEngine } from './effecting/policy-engine';
-import { Transaction } from './effecting/transaction';
-import { MemoryStore } from './memory/store';
-import { Indexer } from './sensing/indexer';
-import { IndexStore } from './sensing/store';
-import { SymbolGraph } from './sensing/symbol-graph';
-import { loadConfig } from './services/config';
-import { TaskJournal } from './services/task-journal';
+import {
+  cmdAsk,
+  cmdDoctor,
+  cmdExplain,
+  cmdImpact,
+  cmdIndex,
+  cmdMap,
+  cmdMemory,
+  cmdMemoryList,
+  cmdModel,
+  cmdPath,
+  cmdPlan,
+  cmdPlugins,
+  cmdPolicy,
+  cmdPromote,
+  cmdPromotions,
+  cmdRun,
+  cmdSkills,
+  cmdStatus,
+  cmdTool,
+  extractFlag,
+} from './commands';
+import { cmdInit } from './init';
+import { buildRuntime, type Runtime } from './runtime';
+import { startShell } from './shell';
 
 const HELP = `archon — constrained AI staff-engineer runtime (MVP)
 
 Usage:
+  archon                  Launch the interactive shell
+  archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
-  archon plan <goal>      Produce a plan tree — no writes               (M6)
-  archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
-  archon status           Show task journal + budgets                   (M0)
+  archon impact [--json] <file>   Blast radius — what a change affects    (M1)
+  archon explain [--json] <symbol>  Definition + direct callers/callees   (M1)
+  archon map [--json]     Graph overview — size + most depended-on        (M1)
+  archon path <a> <b>     Dependency path from symbol a to symbol b        (M1)
+  archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
+  archon run [--skill <n>] [--json] <goal>   Plan→act→verify (worktree)  (M6)
+  archon ask <question>   Stream an answer; @path attaches a file       (M7)
+  archon status [--json] [taskId]   Task journal — or one run's replay   (M0)
+  archon doctor [--json]  Report runtime readiness (planner/keys/state)
+  archon model            Show the provider routing table                (M7)
+  archon memory           List memory-promotion candidates              (M5)
+  archon memory list [tier]    Inspect stored records (by tier)         (M5)
+  archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
+  archon policy [--json] [check <cmd>]   Show the policy, or dry-run a command
+  archon plugins          List loaded plugins + capability previews     (M7)
+  archon skills [name]    List skill playbooks, or print one            (M7)
+  archon tool <name> [json]    Invoke a tool plugin (policy-gated)       (M7)
   archon --help           Show this help
 
 See docs/ROADMAP.md and AGENTS.md.`;
 
-const makeTask = (goal: string, profile: Profile): Task => ({
-  id: `t-${Date.now().toString(36)}`,
-  goal,
-  profile,
-  createdAt: new Date().toISOString(),
-});
-
-function printPlan(cog: CognitivePlan): void {
-  console.log(`plan ${cog.plan.taskId}: ${cog.plan.rationale}`);
-  for (const step of cog.plan.steps) {
-    console.log(`  • ${step.intent}  [${step.capability.action} ${step.capability.target}] (reversible)`);
-  }
-  for (const check of cog.checks) console.log(`  ✓ verify ${check.name}: ${check.argv.join(' ')}`);
-}
-
-function printResults(results: StepResult[]): void {
-  for (const r of results) {
-    const mark = r.verdict.passed ? '✓' : '✗';
-    const where = r.diff ? ` (${r.diff.files.join(', ')})` : '';
-    console.log(`  ${mark} ${r.stepId}${where}`);
-    for (const c of r.verdict.checks) {
-      if (!c.passed && c.output) console.log(`      ${c.name}: ${c.output}`);
-    }
-  }
-  const merged = results.every((r) => r.verdict.passed);
-  console.log(merged ? 'run: merged (verified)' : 'run: discarded (verify failed; main tree untouched)');
-}
-
-async function runPlan(goal: string): Promise<void> {
-  if (!goal) return usageError('plan <goal>');
-  const cog = await new Planner(new ScaffoldStrategy()).plan(makeTask(goal, 'safe'));
-  printPlan(cog);
-}
-
-async function runRun(goal: string): Promise<void> {
-  if (!goal) return usageError('run <goal>');
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const doc = loadPolicy(readFileSync(join(root, config.paths.policy), 'utf8'));
-  const audit = new AuditLog();
-  // `trusted` so the worktree transaction's git ops are permitted; the broker
-  // still gates each one, and writes are confined to the worktree.
-  const brokerAt = (cwd: string): CapabilityBroker =>
-    new CapabilityBroker(new PolicyEngine(doc, 'trusted'), audit, cwd);
-  const memory = new MemoryStore(join(root, config.paths.memory));
-  const journal = new TaskJournal(join(root, config.paths.journal));
-
-  const loop = new CognitionLoop({
-    planner: new Planner(new ScaffoldStrategy()),
-    transaction: new Transaction(brokerAt(root), root, join(root, '.archon/worktrees')),
-    reflector: new Reflector(memory),
-    journal,
-    executorFor: (worktree, taskId) => new Executor(brokerAt(worktree), taskId),
-    verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
-  });
-
+/** Build a runtime, run one command against it, and always close it. */
+async function withRuntime(fn: (rt: Runtime) => Promise<void>): Promise<void> {
+  const rt = await buildRuntime(process.cwd());
   try {
-    printResults(await loop.run(makeTask(goal, 'trusted')));
+    await fn(rt);
   } finally {
-    memory.close();
-    journal.close();
-  }
-}
-
-async function runStatus(): Promise<void> {
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const b = config.budgets;
-  console.log(`profile: ${config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`);
-
-  // Open read-only intent: don't create the db just to report an empty journal.
-  const journalPath = join(root, config.paths.journal);
-  const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
-  try {
-    const recent = journal.recent(15);
-    if (recent.length === 0) {
-      console.log('journal: (empty — run `archon run <goal>`)');
-      return;
-    }
-    console.log(`journal: ${recent.length} most-recent entries (newest first):`);
-    for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}`);
-  } finally {
-    journal.close();
-  }
-}
-
-async function runIndex(): Promise<void> {
-  const root = process.cwd();
-  const config = await loadConfig(root);
-  const core = await loadComputeCore();
-  const store = new IndexStore(join(root, config.paths.index));
-  try {
-    const indexer = new Indexer(core, store, new SymbolGraph(store), root);
-    const dirty = await indexer.dirtyPaths();
-    await indexer.reindex(dirty);
-    console.log(
-      `indexed ${dirty.length} changed path(s) → ${store.allSymbols().length} symbols across ${store.allFileHashes().length} file(s)`,
-    );
-  } finally {
-    store.close();
+    rt.close();
   }
 }
 
@@ -145,21 +74,110 @@ function usageError(form: string): void {
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
+  const json = rest.includes('--json'); // machine-readable output for the report commands
   const goal = rest.join(' ').trim();
   switch (cmd) {
     case undefined:
+      return startShell();
     case '-h':
     case '--help':
       console.log(HELP);
       return;
+    case 'init':
+      return cmdInit(process.cwd());
     case 'index':
-      return runIndex();
-    case 'plan':
-      return runPlan(goal);
-    case 'run':
-      return runRun(goal);
-    case 'status':
-      return runStatus();
+      return withRuntime(cmdIndex);
+    case 'impact': {
+      const file = rest.find((a) => !a.startsWith('--')); // skip --json
+      if (!file) return usageError('impact [--json] <file|symbol>');
+      return withRuntime((rt) => cmdImpact(rt, file, { json }));
+    }
+    case 'explain': {
+      const symbol = rest.find((a) => !a.startsWith('--')); // skip --json
+      if (!symbol) return usageError('explain [--json] <symbol>');
+      return withRuntime((rt) => cmdExplain(rt, symbol, { json }));
+    }
+    case 'map':
+      return withRuntime((rt) => cmdMap(rt, { json }));
+    case 'path': {
+      const [from, to] = rest.filter((a) => !a.startsWith('--'));
+      if (!from || !to) return usageError('path <from-symbol> <to-symbol>');
+      return withRuntime((rt) => cmdPath(rt, from, to));
+    }
+    case 'plan': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.filter((a) => a !== '--json').join(' ').trim();
+      if (!g) return usageError('plan [--skill <name>] [--json] <goal>');
+      return withRuntime((rt) => cmdPlan(rt, g, { skill, json }));
+    }
+    case 'run': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.filter((a) => a !== '--json').join(' ').trim();
+      if (!g) return usageError('run [--skill <name>] [--json] <goal>');
+      return withRuntime((rt) => cmdRun(rt, g, { skill, json }));
+    }
+    case 'ask':
+      if (!goal) return usageError('ask <question>');
+      return withRuntime(async (rt) => {
+        // No readline here, so Ctrl-C arrives as a process signal: catch it to
+        // abort the stream gracefully (partial answer kept) instead of a hard kill.
+        const controller = new AbortController();
+        const onSigint = (): void => controller.abort();
+        process.once('SIGINT', onSigint);
+        try {
+          await cmdAsk(rt, goal, [], controller.signal); // one-shot: no transcript
+        } finally {
+          process.removeListener('SIGINT', onSigint);
+        }
+      });
+    case 'status': {
+      const taskId = rest.find((a) => !a.startsWith('--')); // first non-flag token = a task to replay
+      return withRuntime((rt) => cmdStatus(rt, { json, taskId }));
+    }
+    case 'doctor':
+      return withRuntime((rt) => cmdDoctor(rt, { json }));
+    case 'model':
+      return withRuntime((rt) => cmdModel(rt));
+    case 'policy': {
+      const [sub, ...more] = rest.filter((a) => a !== '--json'); // pull --json out before parsing
+      if (sub === 'check') {
+        const command = more.join(' ').trim();
+        if (!command) return usageError('policy check [--json] <command>');
+        return withRuntime((rt) => cmdPolicy(rt, { check: command, json }));
+      }
+      if (sub) return usageError('policy [--json] [check <command>]');
+      return withRuntime((rt) => cmdPolicy(rt, { json }));
+    }
+    case 'plugins':
+      return withRuntime(cmdPlugins);
+    case 'skills': {
+      const [name] = rest;
+      return withRuntime((rt) => cmdSkills(rt, name));
+    }
+    case 'tool': {
+      const [name, ...more] = rest;
+      if (!name) return usageError('tool <name> [json-input]');
+      const input = more.join(' ').trim();
+      return withRuntime((rt) => cmdTool(rt, name, input || undefined));
+    }
+    case 'memory': {
+      const [sub, ...more] = rest;
+      if (sub === 'promote') {
+        const id = more[0];
+        if (!id) return usageError('memory promote <id>');
+        return withRuntime((rt) => cmdPromote(rt, id));
+      }
+      if (sub === 'recall') {
+        const g = more.join(' ').trim();
+        if (!g) return usageError('memory recall <goal>');
+        return withRuntime((rt) => cmdMemory(rt, g));
+      }
+      if (sub === 'list') {
+        return withRuntime((rt) => cmdMemoryList(rt, more[0]));
+      }
+      if (sub) return usageError('memory [list [tier] | promote <id> | recall <goal>]');
+      return withRuntime(cmdPromotions);
+    }
     default:
       console.error(`unknown command: ${cmd}\n`);
       console.log(HELP);

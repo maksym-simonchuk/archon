@@ -11,6 +11,7 @@ export { Executor } from './cognition/executor';
 export { Verifier } from './cognition/verifier';
 export { Reflector } from './cognition/reflector';
 export { ScaffoldStrategy } from './cognition/scaffold-strategy';
+export { ProviderPlanner } from './cognition/provider-planner';
 export type { CognitivePlan, PlanStrategy, StepAction, VerifierCheck } from './cognition/types';
 export { CapabilityBroker } from './effecting/capability-broker';
 export { PolicyEngine, loadPolicy } from './effecting/policy-engine';
@@ -22,8 +23,23 @@ export { MemoryStore } from './memory/store';
 export { PromotionEngine } from './memory/promotion';
 export { ProviderRouter } from './services/provider-router';
 export type { ProviderClient, RouterOptions } from './services/provider-router';
+export { createAiClient } from './services/providers/ai-sdk';
+export type { AiProvider } from './services/providers/ai-sdk';
+export { MODEL_CATALOG, resolveModels } from './services/model-catalog';
 export { PluginHost } from './services/plugin-host';
 export { TaskJournal } from './services/task-journal';
 export { loadConfig } from './services/config';
 export type { ArchonConfig } from './services/config';
-export type { Plugin, PluginManifest, PluginKind } from './plugins/abi';
+export { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
+export type {
+  Plugin,
+  PluginManifest,
+  PluginKind,
+  ToolPlugin,
+  VerifierPlugin,
+  ProviderPlugin,
+  SkillPlugin,
+  RetrieverPlugin,
+} from './plugins/abi';
+export { buildRuntime } from './runtime';
+export type { Runtime } from './runtime';

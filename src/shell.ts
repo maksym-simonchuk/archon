@@ -1,0 +1,316 @@
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import {
+  type AskTurn,
+  cmdAsk,
+  cmdCost,
+  cmdDoctor,
+  cmdExplain,
+  cmdImpact,
+  cmdIndex,
+  cmdMap,
+  cmdMemory,
+  cmdMemoryList,
+  cmdModel,
+  cmdPath,
+  cmdPlan,
+  cmdPlugins,
+  cmdPolicy,
+  cmdPromote,
+  cmdPromotions,
+  cmdRun,
+  cmdSh,
+  cmdSkills,
+  cmdStatus,
+  cmdTool,
+  extractFlag,
+  plannerLabel,
+} from './commands';
+import { buildRuntime, type Runtime } from './runtime';
+
+const PROMPT = 'archon› ';
+const HISTORY_FILE = 'shell_history';
+const HISTORY_MAX = 1000;
+/** Cap on prior /ask turns fed back into the model — bounds prompt growth + cost. */
+const ASK_CONTEXT_TURNS = 8;
+
+/** Mutable per-REPL state that must persist across dispatched lines (the /ask transcript). */
+export interface ShellSession {
+  askHistory: AskTurn[];
+  /** Controller for an in-flight /ask, if any — Ctrl-C aborts it (see `startShell`). */
+  abort?: AbortController;
+}
+export const newSession = (): ShellSession => ({ askHistory: [] });
+
+/** Every slash command the shell understands — drives tab-completion. */
+const COMMANDS = [
+  '/plan',
+  '/run',
+  '/ask',
+  '/clear',
+  '/index',
+  '/impact',
+  '/explain',
+  '/map',
+  '/path',
+  '/status',
+  '/cost',
+  '/model',
+  '/doctor',
+  '/memory',
+  '/promote',
+  '/plugins',
+  '/skills',
+  '/sh',
+  '/policy',
+  '/tool',
+  '/help',
+  '/exit',
+  '/quit',
+] as const;
+
+const SHELL_HELP = `commands:
+  /plan [--skill <name>] <goal>   plan a task — no writes
+  /run  [--skill <name>] <goal>   plan → act → verify under a worktree transaction
+  /ask <question>  stream an answer; remembers prior turns; @path attaches a file
+  /clear           forget the /ask conversation context
+  /index           incrementally index changed files
+  /impact <file>   blast radius — what a change to <file> affects
+  /explain <symbol>  definition + direct callers/callees (one hop)
+  /map             graph overview — size + most depended-on symbols
+  /path <a> <b>    shortest dependency chain from symbol a to symbol b
+  /status [taskId] task journal · <taskId>: that run's full replay
+  /cost            session spend vs the per-task budget
+  /model           provider routing table (models + per-task chain)
+  /doctor          runtime readiness (planner/keys/state/plugins)
+  /memory [list [tier]|goal]  list: stored records · goal: recall · none: candidates
+  /promote <id>    confirm a memory promotion (the human gate)
+  /plugins         list loaded plugins + capability previews
+  /skills [name]   list skill playbooks · <name>: print one
+  /sh <command>    run a command through the policy broker (gated; argv only)
+  /policy [check <cmd>]  show the safety policy · check: dry-run a command
+  /tool <name> [json]  invoke a tool plugin (policy-gated)
+  /help            this help
+  /exit, /quit     leave the shell  (Ctrl-D also works)
+  <text>           shorthand for /plan <text>
+
+tip: @path in any goal or question attaches that file's contents — read through
+the policy broker, so secrets (.env, keys) are refused, never sent to the model.`;
+
+const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * readline completer: when the line is the start of a slash command, offer the
+ * matching commands; for anything else (e.g. typing a goal) offer nothing so
+ * the input isn't disturbed. Returns the `[completions, line]` tuple readline
+ * expects. Exported so the completion logic is testable without a TTY.
+ */
+export function completeShell(line: string): [string[], string] {
+  return [COMMANDS.filter((c) => c.startsWith(line)), line];
+}
+
+/** Load up to HISTORY_MAX prior input lines (most-recent-first) to seed readline. */
+export function loadHistory(file: string): string[] {
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(0, HISTORY_MAX);
+  } catch {
+    return []; // no history yet (or unreadable) — start clean
+  }
+}
+
+/** Persist readline's history array (most-recent-first). Best-effort: never throws. */
+export function saveHistory(file: string, history: string[]): void {
+  try {
+    writeFileSync(file, history.slice(0, HISTORY_MAX).join('\n'));
+  } catch {
+    // History is a convenience; a write failure must never break the shell.
+  }
+}
+
+/**
+ * Route one line of shell input to a command. A bare line (no leading slash) is
+ * shorthand for `/plan`. Exported so the dispatch table is testable without
+ * driving readline. Returns false only for /exit · /quit (signals the REPL to
+ * stop); every other input returns true.
+ */
+export async function dispatch(rt: Runtime, input: string, session: ShellSession = newSession()): Promise<boolean> {
+  const [head, ...rest] = input.split(/\s+/);
+  const arg = rest.join(' ').trim();
+  const needGoal = (): boolean => {
+    if (arg) return true;
+    console.log(`usage: ${head} <goal>`);
+    return false;
+  };
+
+  switch (head) {
+    case '/exit':
+    case '/quit':
+      return false;
+    case '/help':
+      console.log(SHELL_HELP);
+      return true;
+    case '/plan': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (g) await cmdPlan(rt, g, { skill });
+      else console.log('usage: /plan [--skill <name>] <goal>');
+      return true;
+    }
+    case '/run': {
+      const { value: skill, rest: r } = extractFlag(rest, '--skill');
+      const g = r.join(' ').trim();
+      if (g) await cmdRun(rt, g, { skill });
+      else console.log('usage: /run [--skill <name>] <goal>');
+      return true;
+    }
+    case '/ask':
+      if (needGoal()) {
+        // Publish a controller for the SIGINT handler, then always retract it so
+        // a later Ctrl-C at the prompt exits the shell rather than aborting nothing.
+        const controller = new AbortController();
+        session.abort = controller;
+        try {
+          const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS), controller.signal);
+          if (answer) session.askHistory.push({ question: arg, answer });
+        } finally {
+          session.abort = undefined;
+        }
+      }
+      return true;
+    case '/clear':
+      session.askHistory = [];
+      console.log('context cleared');
+      return true;
+    case '/index':
+      await cmdIndex(rt);
+      return true;
+    case '/impact':
+      if (arg) await cmdImpact(rt, arg);
+      else console.log('usage: /impact <file|symbol>');
+      return true;
+    case '/explain':
+      if (arg) await cmdExplain(rt, arg);
+      else console.log('usage: /explain <symbol>');
+      return true;
+    case '/map':
+      await cmdMap(rt);
+      return true;
+    case '/path': {
+      const [from, to] = rest;
+      if (from && to) await cmdPath(rt, from, to);
+      else console.log('usage: /path <from-symbol> <to-symbol>');
+      return true;
+    }
+    case '/status':
+      await cmdStatus(rt, { taskId: arg || undefined });
+      return true;
+    case '/cost':
+      cmdCost(rt);
+      return true;
+    case '/model':
+      await cmdModel(rt);
+      return true;
+    case '/doctor':
+      await cmdDoctor(rt);
+      return true;
+    case '/memory': {
+      const [sub, ...more] = rest;
+      if (sub === 'list') await cmdMemoryList(rt, more[0]); // /memory list [tier]
+      else if (arg) await cmdMemory(rt, arg); // /memory <goal> → recall
+      else await cmdPromotions(rt); // /memory → promotion candidates
+      return true;
+    }
+    case '/promote':
+      if (arg) await cmdPromote(rt, arg);
+      else console.log('usage: /promote <id>');
+      return true;
+    case '/plugins':
+      await cmdPlugins(rt);
+      return true;
+    case '/skills':
+      await cmdSkills(rt, arg || undefined);
+      return true;
+    case '/sh':
+      if (arg) await cmdSh(rt, arg);
+      else console.log('usage: /sh <command> [args…]');
+      return true;
+    case '/policy': {
+      const [sub, ...more] = rest;
+      if (sub === 'check') await cmdPolicy(rt, { check: more.join(' ').trim() });
+      else if (sub) console.log('usage: /policy [check <command>]');
+      else await cmdPolicy(rt);
+      return true;
+    }
+    case '/tool': {
+      const [name, ...more] = rest;
+      if (!name) console.log('usage: /tool <name> [json-input]');
+      else await cmdTool(rt, name, more.join(' ').trim() || undefined);
+      return true;
+    }
+    default:
+      if (head.startsWith('/')) {
+        console.log(`unknown command "${head}" — try /help`);
+        return true;
+      }
+      await cmdPlan(rt, input); // bare text → plan
+      return true;
+  }
+}
+
+/**
+ * Interactive REPL — the `archon` no-arg surface. Builds one Runtime for the
+ * whole session (so the journal, memory, and provider cache persist across
+ * commands) and drives it line-by-line via readline. Zero new dependencies:
+ * history (up/down) and line editing come from `node:readline`. Exits on /exit,
+ * /quit, or EOF (Ctrl-D), closing the runtime.
+ */
+export async function startShell(): Promise<void> {
+  const rt = await buildRuntime(process.cwd());
+  const session = newSession(); // one /ask transcript for the whole REPL lifetime
+  const historyFile = join(rt.root, '.archon', HISTORY_FILE);
+  let history = loadHistory(historyFile);
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: PROMPT,
+    completer: completeShell,
+    history,
+    historySize: HISTORY_MAX,
+    removeHistoryDuplicates: true,
+  });
+  // readline emits the full (most-recent-first) array on every change; keep the
+  // latest so we can persist it once on exit rather than on every keystroke.
+  rl.on('history', (h: string[]) => {
+    history = h;
+  });
+  // Ctrl-C cancels an in-flight /ask and stays in the shell; with nothing
+  // streaming it means "leave", same as Ctrl-D. (readline owns SIGINT once it
+  // has a listener, so this never kills the process mid-stream.)
+  rl.on('SIGINT', () => {
+    if (session.abort) session.abort.abort();
+    else rl.close();
+  });
+
+  console.log('archon interactive shell — /help for commands, /exit to quit');
+  console.log(plannerLabel(rt.llmPlanning));
+  rl.prompt();
+
+  try {
+    for await (const line of rl) {
+      const input = line.trim();
+      if (input) {
+        try {
+          if (!(await dispatch(rt, input, session))) break;
+        } catch (e) {
+          console.error(`[archon] ${msg(e)}`);
+        }
+      }
+      rl.prompt();
+    }
+  } finally {
+    rl.close();
+    rt.close();
+    saveHistory(historyFile, history);
+  }
+}

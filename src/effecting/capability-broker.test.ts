@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { access, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -68,6 +68,45 @@ describe('CapabilityBroker (M3)', () => {
     expect(escaped.ok).toBe(false);
     if (!escaped.ok) expect(escaped.error.message).toContain('escapes');
     expect(await exists(join(dir, '..', 'evil.txt'))).toBe(false);
+  });
+
+  it('reads a normal file on allow', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    await writeFile(join(dir, 'note.txt'), 'hello from disk\n');
+
+    const read = await broker.fsRead('note.txt', { reason: 'inspect' });
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.value).toContain('hello from disk');
+  });
+
+  it('denies reading a secret file and never returns its contents (policy enforced, not just declared)', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    await writeFile(join(dir, '.env'), 'OPENAI_API_KEY=sk-do-not-leak\n');
+
+    const read = await broker.fsRead('.env', { reason: 'exfil attempt' });
+    expect(read.ok).toBe(false);
+    if (!read.ok) {
+      expect(read.error.code).toBe('policy.deny');
+      expect(read.error.message ?? '').not.toContain('sk-do-not-leak'); // the secret never surfaces
+    }
+  });
+
+  it('denies reads that escape the repo tree', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    const escaped = await broker.fsRead('../secret.txt', { reason: 'escape' });
+    expect(escaped.ok).toBe(false);
+    if (!escaped.ok) expect(escaped.error.message).toContain('escapes');
+  });
+
+  it('returns a benign fs.read_failed (not a throw) for a missing file', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    const read = await broker.fsRead('nope.txt', { reason: 'typo' });
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.error.code).toBe('fs.read_failed');
   });
 
   it('denies writes that escape via an in-repo symlink (realpath, not lexical)', async () => {
