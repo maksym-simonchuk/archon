@@ -56,8 +56,8 @@ describe('shell dispatch', () => {
     try {
       expect(await dispatch(rt, 'add a greeter')).toBe(true);
       const out = text(log);
-      expect(out).toContain('planner: deterministic (scaffold)');
-      expect(out).toContain('plan t-'); // a plan tree was rendered
+      expect(out).toContain('•'); // a plan step was rendered
+      expect(out).toContain('✓'); // a verifying check was rendered
     } finally {
       rt.close();
     }

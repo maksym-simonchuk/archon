@@ -38,15 +38,10 @@ export const makeTask = (goal: string, profile: Profile): Task => ({
   createdAt: new Date().toISOString(),
 });
 
-export const plannerLabel = (llm: boolean): string =>
-  `planner: ${llm ? 'llm (provider-router)' : 'deterministic (scaffold)'}`;
-
 export function printPlan(cog: CognitivePlan): void {
-  console.log(`plan ${cog.plan.taskId}: ${cog.plan.rationale}`);
-  for (const step of cog.plan.steps) {
-    console.log(`  • ${step.intent}  [${step.capability.action} ${step.capability.target}] (reversible)`);
-  }
-  for (const check of cog.checks) console.log(`  ✓ verify ${check.name}: ${check.argv.join(' ')}`);
+  console.log(cog.plan.rationale);
+  for (const step of cog.plan.steps) console.log(`  • ${step.intent}`);
+  for (const check of cog.checks) console.log(`  ✓ ${check.name}`);
 }
 
 export function printResults(results: StepResult[]): void {
@@ -274,7 +269,6 @@ export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string;
     console.log(JSON.stringify(report, null, 2));
     return;
   }
-  console.log(plannerLabel(rt.llmPlanning));
   printPlan(cog);
 }
 
@@ -312,7 +306,6 @@ export async function cmdRun(
     console.log(JSON.stringify(report, null, 2));
     return;
   }
-  console.log(plannerLabel(rt.llmPlanning));
   // Print the id before running so it's known even if the loop throws mid-run —
   // the partial journal is still inspectable via `archon status <id>`.
   console.log(`run ${task.id}: ${goal}`);
@@ -844,7 +837,6 @@ export async function cmdAgentRun(rt: Runtime, goal: string, opts: { run?: boole
   const context = `${agentBriefing(agent)}\n\n${await planContext(rt, task, goal)}`;
   console.log(`agent: ${agent.id} (${agent.capabilities.join(', ')} · escalate ≥ ${agent.escalateAtRisk})`);
   if (!opts.run) {
-    console.log(plannerLabel(rt.llmPlanning));
     printPlan(await rt.planner().plan(task, context));
     console.log(`  to execute under this agent: /agent --run ${goal}`);
     return;
@@ -1006,7 +998,7 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   // transaction (the index store is closed first to avoid a second open on it).
   const task = makeTask(run.goal, 'trusted');
   const context = `${agentBriefing(run.agent)}\n\n${await planContext(rt, task, run.goal)}`;
-  console.log(`  agent: ${run.agent.id} (${run.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)}`);
+  console.log(`  agent: ${run.agent.id} (${run.agent.capabilities.join(', ')})`);
   console.log(`  run ${task.id}`);
   // `refactor` already ran the M14/M20 simulation gate at the command layer
   // (block refused, review needed --force), so the loop's own preservation gate
@@ -1108,7 +1100,7 @@ function safeRefactor(rt: Runtime, opts: { pick?: number; force?: boolean }): Ex
       if (!state.agent || !state.goal) return { status: 'failed', detail: 'no validated change to execute' };
       const task = makeTask(state.goal, 'trusted');
       const context = `${agentBriefing(state.agent)}\n\n${await planContext(rt, task, state.goal)}`;
-      console.log(`  agent: ${state.agent.id} (${state.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)} · run ${task.id}`);
+      console.log(`  agent: ${state.agent.id} (${state.agent.capabilities.join(', ')}) · run ${task.id}`);
       // `force` only defers the loop's *preservation* gate (already run in the
       // simulate/validate phases); the structural forbidden-import / cycle blocks
       // are non-overridable and still fire — blocking a bad change before write.

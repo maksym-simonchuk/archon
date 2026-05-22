@@ -340,6 +340,7 @@ export async function startTui(): Promise<void> {
   let busy = false;
   let busyLabel = 'working…';
   let busyStart = 0; // ms timestamp the current command started (for elapsed time)
+  let queued: string | null = null; // a line typed during a turn, auto-sent when it ends
   let spinnerFrame = 0;
   let armedExit = false; // first ^C on an empty line arms exit; second exits
   let running = true;
@@ -373,21 +374,21 @@ export async function startTui(): Promise<void> {
   };
 
   const headerRow = (cols: number): string => {
-    const planner = rt.llmPlanning ? 'llm' : 'scaffold';
     const left = ` ${bold('archon')} ${dim('·')} ${basename(rt.root)} `;
-    const right = ` ${rt.config.profile} ${dim('·')} ${planner} ${dim('·')} $${rt.router.spent.toFixed(4)} `;
+    const right = ` ${rt.config.profile} ${dim('·')} $${rt.router.spent.toFixed(4)} `;
     const gap = Math.max(1, cols - visibleWidth(left) - visibleWidth(right));
     return inverse(clip(left + ' '.repeat(gap) + right, cols));
   };
 
   const footerRow = (cols: number): string => {
-    const hint = busy
-      ? `${cyan(SPINNER[spinnerFrame])} ${dim('^C to cancel')}`
-      : searchMode
-        ? dim('↵ accept · ^R next · ↑↓ select · Esc cancel · type to filter')
-        : armedExit
-          ? yellow('press ^C again to exit')
-          : dim('↵ send · ⇥ complete · ↑↓ history · ^R search · ^C clear · /help');
+    // While busy the activity line above the box carries the interrupt hint, so
+    // the footer stays out of the way.
+    if (busy) return '';
+    const hint = searchMode
+      ? dim('↵ accept · ^R next · ↑↓ select · Esc cancel · type to filter')
+      : armedExit
+        ? yellow('press ^C again to exit')
+        : dim('↵ send · ⇥ complete · ↑↓ history · ^R search · ^C clear · /help');
     return clip(` ${hint}`, cols);
   };
 
@@ -404,16 +405,18 @@ export async function startTui(): Promise<void> {
       const tok = Math.round(streamedChars / 4);
       parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
     }
-    parts.push('^C to interrupt');
+    parts.push('esc to interrupt');
     return parts.join(' · '); // plain separator: the caller wraps the whole tail in dim
   };
 
+  // The activity line lives ABOVE the input box (Claude-Code style), so the box
+  // itself always stays a clean prompt — the status is never painted into the
+  // user's input field.
+  const statusRow = (cols: number): string =>
+    clip(` ${cyan(SPINNER[spinnerFrame])} ${bold(busyLabel)} ${dim(`(${busyStatus()})`)}`, cols);
+
   const inputContent = (cols: number): { content: string; cursorCol: number } => {
     const innerW = Math.max(0, cols - 2); // floors at 0 so the box never exceeds `cols`
-    if (busy) {
-      const line = `${cyan(SPINNER[spinnerFrame])} ${bold(busyLabel)} ${dim(`(${busyStatus()})`)}`;
-      return { content: padTo(clip(line, innerW), innerW), cursorCol: -1 };
-    }
     const field = Math.max(1, innerW - PROMPT_W); // visible columns for the buffer itself
     const hscroll = input.cursor > field - 1 ? input.cursor - (field - 1) : 0;
     const visible = input.buffer.slice(hscroll, hscroll + field);
@@ -501,11 +504,13 @@ export async function startTui(): Promise<void> {
       belowBox = menuRows(cols, menu, menuStart, items.length);
     }
 
-    // Fixed chrome = header(1) + input box(3) + footer(1) = 5 rows.
-    let transcriptHeight = rows - 5 - belowBox.length;
+    // Fixed chrome = header(1) + input box(3) + footer(1) = 5 rows, plus the
+    // activity line(1) when busy.
+    const statusH = (busy ? 1 : 0) + (queued !== null ? 1 : 0);
+    let transcriptHeight = rows - 5 - statusH - belowBox.length;
     if (transcriptHeight < 1) {
       belowBox = [];
-      transcriptHeight = Math.max(1, rows - 5);
+      transcriptHeight = Math.max(1, rows - 5 - statusH);
     }
 
     // Transcript display lines (wrapped), then the visible tail. Lines inside a
@@ -549,6 +554,11 @@ export async function startTui(): Promise<void> {
     const frame: string[] = [headerRow(cols)];
     for (let i = 0; i < transcriptHeight; i++) frame.push(view[i] ?? '');
 
+    // Activity line above the box, only while a turn runs; the queued type-ahead
+    // line (if any) sits just under it.
+    if (busy) frame.push(statusRow(cols));
+    if (queued !== null) frame.push(clip(dim(` ⏎ queued — ${queued}`), cols));
+
     // Framed input box: ╭──╮ / │ › … │ / ╰──╯. The cursor sits on the middle row.
     const span = Math.max(0, cols - 2);
     frame.push(dim(BOX.tl + BOX.h.repeat(span) + BOX.tr));
@@ -567,6 +577,7 @@ export async function startTui(): Promise<void> {
       if (r < frame.length - 1) out += '\r\n';
     }
     out += '\x1b[J';
+    // The input stays live during a turn (type-ahead), so show the cursor too.
     if (cursorCol > 0) out += `\x1b[${inputRowIndex + 1};${cursorCol}H${SHOW_CURSOR}`;
     realWrite(out);
   };
@@ -613,6 +624,12 @@ export async function startTui(): Promise<void> {
       }
       busy = false;
       render();
+      // A line composed during the turn (type-ahead) auto-sends now.
+      if (queued !== null) {
+        const next = queued;
+        queued = null;
+        void submit(next);
+      }
     }
   };
 
@@ -689,7 +706,40 @@ export async function startTui(): Promise<void> {
     }
     armedExit = false;
 
-    if (busy) return; // ignore everything else mid-command
+    // While a turn runs the input stays live (Claude-Code-style type-ahead):
+    // edit the next message freely, Esc interrupts the model, and Enter queues
+    // the line to auto-send the moment the turn finishes.
+    if (busy) {
+      if (key.name === 'escape') {
+        if (session.abort) session.abort.abort();
+        return;
+      }
+      if (key.name === 'return' || key.name === 'enter') {
+        const line = input.buffer.trim();
+        if (line) {
+          queued = line;
+          input = { buffer: '', cursor: 0 };
+          render();
+        }
+        return;
+      }
+      const next = editKey(input, key);
+      if (next !== input) {
+        input = next;
+        render();
+      }
+      return;
+    }
+
+    // ^L — clear the screen (readline convention); keeps the /ask context, unlike /clear.
+    if (key.ctrl && key.name === 'l') {
+      transcript.length = 0;
+      responseStarts.clear();
+      awaitingResponse = false;
+      scrollOffset = 0;
+      render();
+      return;
+    }
 
     // ^R — enter reverse-history search (fuzzy, ranked in the Rust core).
     if (key.ctrl && key.name === 'r') {
