@@ -14,6 +14,7 @@ import {
   cmdMemory,
   cmdMemoryList,
   cmdModel,
+  cmdPath,
   cmdPlan,
   cmdPlugins,
   cmdPolicy,
@@ -38,6 +39,7 @@ Usage:
   archon impact [--json] <file>   Blast radius — what a change affects    (M1)
   archon explain [--json] <symbol>  Definition + direct callers/callees   (M1)
   archon map [--json]     Graph overview — size + most depended-on        (M1)
+  archon path <a> <b>     Dependency path from symbol a to symbol b        (M1)
   archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
@@ -97,6 +99,11 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'map':
       return withRuntime((rt) => cmdMap(rt, { json }));
+    case 'path': {
+      const [from, to] = rest.filter((a) => !a.startsWith('--'));
+      if (!from || !to) return usageError('path <from-symbol> <to-symbol>');
+      return withRuntime((rt) => cmdPath(rt, from, to));
+    }
     case 'plan': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
       const g = r.filter((a) => a !== '--json').join(' ').trim();

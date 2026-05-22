@@ -13,6 +13,7 @@ import {
   cmdMemory,
   cmdMemoryList,
   cmdModel,
+  cmdPath,
   cmdPlan,
   cmdPlugins,
   cmdPolicy,
@@ -52,6 +53,7 @@ const COMMANDS = [
   '/impact',
   '/explain',
   '/map',
+  '/path',
   '/status',
   '/cost',
   '/model',
@@ -77,6 +79,7 @@ const SHELL_HELP = `commands:
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
+  /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
@@ -193,6 +196,12 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/map':
       await cmdMap(rt);
       return true;
+    case '/path': {
+      const [from, to] = rest;
+      if (from && to) await cmdPath(rt, from, to);
+      else console.log('usage: /path <from-symbol> <to-symbol>');
+      return true;
+    }
     case '/status':
       await cmdStatus(rt, { taskId: arg || undefined });
       return true;

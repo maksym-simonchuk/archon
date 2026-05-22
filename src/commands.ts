@@ -507,6 +507,64 @@ export async function cmdMap(rt: Runtime, opts: { json?: boolean } = {}): Promis
   }
 }
 
+type IndexedSymbol = { name: string; file: string; kind: string };
+
+/**
+ * Resolve a query to a single indexed symbol: a fully-qualified id matches
+ * directly, else a bare name (`foo`) matches by the segment after '#', which may
+ * collide across files. Returns the match, or the colliding candidates so the
+ * caller can ask the operator to qualify.
+ */
+function resolveSymbol(all: IndexedSymbol[], query: string): { match?: IndexedSymbol; candidates: string[] } {
+  const exact = all.find((s) => s.name === query);
+  if (exact) return { match: exact, candidates: [] };
+  const matches = all.filter((s) => bareName(s.name) === query);
+  if (matches.length === 1) return { match: matches[0], candidates: [] };
+  return { candidates: matches.map((m) => m.name) };
+}
+
+const unresolvedMsg = (label: string, query: string, candidates: string[]): string =>
+  candidates.length > 0
+    ? `path: ${label} "${query}" is ambiguous — qualify one of: ${candidates.join(', ')}`
+    : `path: ${label} "${query}" is not an indexed symbol`;
+
+/**
+ * Trace the shortest dependency chain from one symbol to another: "how does A
+ * reach B?" Follows dependency edges (A → … → B means A transitively depends on
+ * B), the trace complement to `impact`'s reverse set. Both endpoints accept a
+ * qualified id or a bare name (ambiguity is reported). Read-only and WASM-free.
+ */
+export async function cmdPath(rt: Runtime, from: string, to: string): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('path: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const all = store.allSymbols();
+    const a = resolveSymbol(all, from);
+    if (!a.match) {
+      console.log(unresolvedMsg('from', from, a.candidates));
+      return;
+    }
+    const b = resolveSymbol(all, to);
+    if (!b.match) {
+      console.log(unresolvedMsg('to', to, b.candidates));
+      return;
+    }
+    const chain = new SymbolGraph(store).path(a.match.name, b.match.name);
+    if (!chain) {
+      console.log(`path: ${a.match.name} does not transitively depend on ${b.match.name} (no path)`);
+      return;
+    }
+    console.log(`path: ${a.match.name} depends on ${b.match.name} via ${chain.length - 1} hop(s):`);
+    console.log(`  ${chain.join(' → ')}`);
+  } finally {
+    store.close();
+  }
+}
+
 /** Machine-readable shape of `archon status --json` (a stable automation contract). */
 export interface StatusReport {
   profile: Profile;
