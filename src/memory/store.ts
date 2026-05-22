@@ -96,6 +96,22 @@ export class MemoryStore {
     return rows.map(toRecord);
   }
 
+  /**
+   * Every record, optionally narrowed to one tier — pinned (ADRs) first, then by
+   * access decay (frequency, then recency). Read-only inspection for `archon
+   * memory list`; unlike `recall` it does NOT count as an access.
+   */
+  list(tier?: MemoryTier): MemoryRecord[] {
+    const cols = 'id, tier, key, content, created_at, confirmed, pinned';
+    const order = 'ORDER BY pinned DESC, freq DESC, last_access DESC';
+    const rows = (
+      tier === undefined
+        ? this.db.prepare(`SELECT ${cols} FROM memory ${order}`).all()
+        : this.db.prepare(`SELECT ${cols} FROM memory WHERE tier = ? ${order}`).all(tier)
+    ) as Array<Record<string, unknown>>;
+    return rows.map(toRecord);
+  }
+
   /** One record by id (does not count as an access). */
   get(id: string): MemoryRecord | undefined {
     const row = this.db

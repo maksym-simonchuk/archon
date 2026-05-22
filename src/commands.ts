@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
-import type { JournalEntry, PolicyDecision, Profile, StepResult, Task } from './core/types';
+import type { JournalEntry, MemoryTier, PolicyDecision, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
@@ -640,6 +640,38 @@ export async function cmdPromotions(rt: Runtime): Promise<void> {
   }
   console.log(`memory: ${candidates.length} promotion candidate(s) — confirm with \`memory promote <id>\`:`);
   for (const c of candidates) console.log(`  ${c.id}  [${c.tier} ↑]  ${c.key}`);
+}
+
+const MEMORY_TIERS: MemoryTier[] = ['episodic', 'semantic', 'procedural'];
+const isMemoryTier = (s: string): s is MemoryTier => (MEMORY_TIERS as string[]).includes(s);
+
+/**
+ * Inspect what memory holds — the stored records, optionally narrowed to one
+ * tier (episodic → semantic → procedural), pinned (ADRs) first. This makes the
+ * memory plane observable the way `policy` does for the safety plane: you can see
+ * what was learned and which records are confirmed, not just recall by goal.
+ * Read-only — guarded on the db's existence so it never creates an empty store.
+ */
+export async function cmdMemoryList(rt: Runtime, tier?: string): Promise<void> {
+  if (!existsSync(join(rt.root, rt.config.paths.memory))) {
+    console.log('memory: empty (no runs yet)');
+    return;
+  }
+  if (tier !== undefined && !isMemoryTier(tier)) {
+    console.log(`memory: unknown tier "${tier}" — use one of: ${MEMORY_TIERS.join(', ')}`);
+    return;
+  }
+  const records = rt.memory().list(tier);
+  if (records.length === 0) {
+    console.log(tier ? `memory: no records in the ${tier} tier` : 'memory: no records stored yet');
+    return;
+  }
+  console.log(`memory: ${records.length} record(s)${tier ? ` in ${tier}` : ''} (pinned/most-used first):`);
+  for (const r of records) {
+    const flag = r.confirmed ? ' ✓confirmed' : '';
+    const preview = r.content.replace(/\s+/g, ' ').trim().slice(0, 60);
+    console.log(`  [${r.tier.padEnd(10)}] ${r.key}${flag}  ${preview}`);
+  }
 }
 
 /** The human gate: confirm a candidate, moving it one tier up (episodic → semantic → procedural). */

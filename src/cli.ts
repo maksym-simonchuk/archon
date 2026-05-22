@@ -12,6 +12,7 @@ import {
   cmdIndex,
   cmdMap,
   cmdMemory,
+  cmdMemoryList,
   cmdModel,
   cmdPlan,
   cmdPlugins,
@@ -44,6 +45,7 @@ Usage:
   archon doctor [--json]  Report runtime readiness (planner/keys/state)
   archon model            Show the provider routing table                (M7)
   archon memory           List memory-promotion candidates              (M5)
+  archon memory list [tier]    Inspect stored records (by tier)         (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon policy [check <cmd>]   Show the safety policy, or dry-run a command
   archon plugins          List loaded plugins + capability previews     (M7)
@@ -163,7 +165,10 @@ async function main(argv: string[]): Promise<void> {
         if (!g) return usageError('memory recall <goal>');
         return withRuntime((rt) => cmdMemory(rt, g));
       }
-      if (sub) return usageError('memory [promote <id> | recall <goal>]');
+      if (sub === 'list') {
+        return withRuntime((rt) => cmdMemoryList(rt, more[0]));
+      }
+      if (sub) return usageError('memory [list [tier] | promote <id> | recall <goal>]');
       return withRuntime(cmdPromotions);
     }
     default:

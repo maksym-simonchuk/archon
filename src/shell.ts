@@ -11,6 +11,7 @@ import {
   cmdIndex,
   cmdMap,
   cmdMemory,
+  cmdMemoryList,
   cmdModel,
   cmdPlan,
   cmdPlugins,
@@ -80,7 +81,7 @@ const SHELL_HELP = `commands:
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
-  /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
+  /memory [list [tier]|goal]  list: stored records · goal: recall · none: candidates
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
   /skills [name]   list skill playbooks · <name>: print one
@@ -204,9 +205,13 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/doctor':
       await cmdDoctor(rt);
       return true;
-    case '/memory':
-      await (arg ? cmdMemory(rt, arg) : cmdPromotions(rt));
+    case '/memory': {
+      const [sub, ...more] = rest;
+      if (sub === 'list') await cmdMemoryList(rt, more[0]); // /memory list [tier]
+      else if (arg) await cmdMemory(rt, arg); // /memory <goal> → recall
+      else await cmdPromotions(rt); // /memory → promotion candidates
       return true;
+    }
     case '/promote':
       if (arg) await cmdPromote(rt, arg);
       else console.log('usage: /promote <id>');
