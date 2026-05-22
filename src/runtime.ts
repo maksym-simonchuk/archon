@@ -16,12 +16,14 @@ import { AgentBroker } from './effecting/agent-broker';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
+import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
 import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
 import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
+import { extractImports, resolveImport } from './sensing/import-resolver';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph } from './sensing/symbol-graph';
@@ -215,6 +217,37 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return sections.filter((s) => s.length > 0).join('\n');
   };
 
+  // Pre-apply gate (M19): structural pre-write check the loop runs before opening
+  // a worktree. Resolves the import edges the planned writes would add and runs
+  // them, with the indexed edge set, through evaluatePreHooks — so a never-modify
+  // write or a cycle-closing import is refused before anything is written. No
+  // index yet ⇒ no structural signal ⇒ allow (the broker still gates each write).
+  const preApply = async (writes: { target: string; content: string }[]): Promise<PreHookFinding[]> => {
+    if (writes.length === 0) return [];
+    // The never-modify check needs only the write targets; the cycle/leak checks
+    // need the indexed edge set + the imports each write would add. With no index,
+    // edges are empty (never-modify still fires) — the broker gates each write too.
+    const indexPath = join(root, config.paths.index);
+    let existingEdges: { src: string; dst: string }[] = [];
+    let addedImports: { src: string; dst: string }[] = [];
+    if (existsSync(indexPath)) {
+      const store = new IndexStore(indexPath);
+      try {
+        existingEdges = store.loadFileEdges();
+      } finally {
+        store.close();
+      }
+      const onDisk = (rel: string): boolean => existsSync(join(root, ...rel.split('/')));
+      addedImports = writes.flatMap(({ target, content }) =>
+        extractImports(content)
+          .map((spec) => resolveImport(target, spec, onDisk))
+          .filter((dst): dst is string => dst !== undefined && dst !== target)
+          .map((dst) => ({ src: target, dst })),
+      );
+    }
+    return evaluatePreHooks({ writes: writes.map((w) => w.target), addedImports, existingEdges });
+  };
+
   const loop = (agent?: AgentSpec): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
@@ -233,6 +266,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       // needing a capability the profile won't grant stays inert rather than
       // gaining the loop's trusted authority — plugins tighten, never widen.
       verifierPlugins: async (files) => (await pluginHost()).runVerifiers(files),
+      preApply,
       cost: () => router.spent,
     });
 

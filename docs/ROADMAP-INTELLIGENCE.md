@@ -25,7 +25,7 @@ The spec asks for a *repository operating system*. What exists today is the
 | Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
 | Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy, **+ runtime binding** (`selectAgent`/`agentBriefing` → prompt; `AgentBroker` → capability-scoped authority; `/agent --run`) | — |
 | Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | 🟡 skills = passive Markdown; pre/post hook engine now exists | Multi-phase executable skill runtime deferred (M19 note) |
-| Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate + post-write check specs | Wiring the gate into the loop's write path deferred |
+| Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate, **now wired into the loop** (blocks before any worktree) + post-write check specs | — |
 | Preservation layer (intentional vs accidental complexity) | ✅ classifier + gate (preserve/caution/allow) | Advisory; not yet a hard write-block (M14 note) |
 | Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
 | Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
@@ -132,7 +132,8 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Build: skill runtime with phases analyze → simulate → validate → execute → rollback (e.g. `safe-refactor`, `dependency-cleanup`, `architecture-review`). Hooks engine enforcing pre (forbidden-import, boundary, dependency-constraint) and post (lint, typecheck, test, regression, bundle) checks via the broker.
 - Deps: M13, M14. Exit: `safe-refactor` runs all phases; a forbidden-import pre-hook blocks a bad change before write.
 - Shipped: pure `evaluatePreHooks` (`src/effecting/hooks.ts`) — the static pre-write gate: **never-modify** (write into a sensitive zone → block), **forbidden-import** (an added edge that closes a module cycle → block, via reachability over the existing module graph), **boundary-leak** (cross-module import past the public surface → warn). `postHookChecks(fingerprint)` derives the post-write checks the stack implies (typecheck + the detected test runner). `/hooks` (`cmdHooks`) introspects both. `effecting` stays self-contained (inlined `moduleOf`, no sensing import).
-- Deferred: the multi-phase executable skill runtime (analyze→simulate→validate→execute→rollback) and wiring the pre-write gate into the loop's write path before the broker.
+- Pre-write gate now wired into the loop: `runtime.preApply` resolves the import edges the planned writes would add (M8.5 resolver + indexed edge set) and runs `evaluatePreHooks`; `CognitionLoop.run` aborts on any `block` finding **before opening a worktree** (journals `plan`→`verdict`→`decision`, nothing written) — unbypassable for every loop run (`/run`, `/agent --run`, `/refactor`), not just per-command. It can only refuse, never grant authority the broker wouldn't.
+- Deferred: the multi-phase executable skill runtime (analyze→simulate→validate→execute→rollback).
 
 #### M20 — Execution Simulation Engine 🟡 (engine shipped)
 - Goal: predict impact before applying, not only verify after.

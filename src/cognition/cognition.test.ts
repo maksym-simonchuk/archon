@@ -13,7 +13,7 @@ import { Transaction } from '../effecting/transaction';
 import { MemoryStore } from '../memory/store';
 import { TaskJournal } from '../services/task-journal';
 import { Executor } from './executor';
-import { CognitionLoop } from './loop';
+import { CognitionLoop, type CognitionLoopDeps } from './loop';
 import { Planner } from './planner';
 import { Reflector } from './reflector';
 import { ScaffoldStrategy } from './scaffold-strategy';
@@ -52,6 +52,7 @@ function loopFor(
   journal: TaskJournal,
   cost?: () => number,
   verifierPlugins?: (files: string[]) => Promise<Verdict[]>,
+  preApply?: CognitionLoopDeps['preApply'],
 ): CognitionLoop {
   const audit = new AuditLog();
   // `trusted` so worktree/merge git ops are permitted; the broker still gates each.
@@ -65,6 +66,7 @@ function loopFor(
     executorFor: (worktree, taskId) => new Executor(brokerAt(worktree), taskId),
     verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
     verifierPlugins,
+    preApply,
     cost,
   });
 }
@@ -188,6 +190,50 @@ describe('CognitionLoop (M6)', () => {
     expect(verify?.verdict.passed).toBe(false);
     expect(verify?.verdict.checks.some((c) => c.name === 'plugin:veto')).toBe(true);
     expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(false); // vetoed ⇒ never merged
+    memory.close();
+    journal.close();
+  });
+
+  it('aborts before any worktree when a pre-apply hook blocks (M19 gate)', async () => {
+    repo = await initRepo();
+    wt = await mkdtemp(join(tmpdir(), 'archon-cwt-'));
+    const memory = new MemoryStore(':memory:');
+    const journal = new TaskJournal(':memory:');
+    const seen: { target: string; content: string }[][] = [];
+    // A gate that blocks the planned write outright.
+    const block: CognitionLoopDeps['preApply'] = async (writes) => {
+      seen.push(writes);
+      return [{ hook: 'never-modify', severity: 'block', subject: writes[0]?.target ?? '?', detail: 'sensitive zone' }];
+    };
+    const t = task('add function greet');
+    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal, undefined, undefined, block).run(t);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]?.stepId).toContain('prehook');
+    expect(results[0]?.verdict.passed).toBe(false);
+    expect(seen[0]?.length).toBeGreaterThan(0); // the gate saw the planned writes
+    expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(false); // nothing written
+
+    const entries = await journal.replay(t.id);
+    expect(entries.map((e) => e.kind)).toEqual(['plan', 'verdict', 'decision']); // no step/diff — never opened a worktree
+    memory.close();
+    journal.close();
+  });
+
+  it('proceeds normally when the pre-apply gate returns no blocking findings', async () => {
+    repo = await initRepo();
+    wt = await mkdtemp(join(tmpdir(), 'archon-cwt-'));
+    const memory = new MemoryStore(':memory:');
+    const journal = new TaskJournal(':memory:');
+    // A gate that only warns — the run must still merge.
+    const warnOnly: CognitionLoopDeps['preApply'] = async () => [
+      { hook: 'boundary-leak', severity: 'warn', subject: 'a → b', detail: 'internal import' },
+    ];
+    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal, undefined, undefined, warnOnly).run(
+      task('add function greet'),
+    );
+    expect(results.every((r) => r.verdict.passed)).toBe(true);
+    expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(true); // merged
     memory.close();
     journal.close();
   });
