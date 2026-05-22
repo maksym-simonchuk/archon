@@ -30,6 +30,7 @@ import {
   cmdPromote,
   cmdPromotions,
   cmdRefactor,
+  cmdRecap,
   cmdRisk,
   cmdRun,
   cmdSh,
@@ -87,6 +88,7 @@ export const COMMANDS = [
   '/simulate',
   '/path',
   '/status',
+  '/recap',
   '/cost',
   '/model',
   '/doctor',
@@ -127,6 +129,7 @@ const SHELL_HELP = `commands:
   /simulate <file> [change]  predict blast radius + regression probability before applying
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
+  /recap            per-run digest of recent activity + health trend
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
@@ -387,6 +390,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     }
     case '/status':
       await cmdStatus(rt, { taskId: arg || undefined });
+      return true;
+    case '/recap':
+      await cmdRecap(rt);
       return true;
     case '/cost':
       cmdCost(rt);

@@ -43,7 +43,7 @@ The spec asks for a *repository operating system*. What exists today is the
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
 `violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ✅(simulation-gated, agent-scoped) ·
 `boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
-`explain` 🟡(symbol≠architecture reasoning).
+`explain` 🟡(symbol≠architecture reasoning) · `recap` ✅(per-run journal digest + health trend).
 
 ---
 

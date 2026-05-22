@@ -198,6 +198,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/simulate': 'predict blast radius + regression before applying',
   '/path': 'shortest dependency chain a → b',
   '/status': 'task journal (· taskId for replay)',
+  '/recap': 'per-run digest + health trend',
   '/cost': 'session spend vs budget',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',

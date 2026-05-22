@@ -28,6 +28,7 @@ import { IndexStore } from './sensing/store';
 import { changedSince, formatWatchTick } from './sensing/watch';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
+import { formatRecap, recap } from './services/recap';
 
 export const makeTask = (goal: string, profile: Profile): Task => ({
   id: `t-${Date.now().toString(36)}`,
@@ -1279,6 +1280,31 @@ export async function cmdStatus(rt: Runtime, opts: { json?: boolean; taskId?: st
     for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}${journalHint(e)}`);
   } finally {
     journal.close();
+  }
+}
+
+/**
+ * Recap: a per-run digest of Archon's recent activity (from the task journal) +
+ * the latest architecture-health reading and its trend. Read-only — opens the
+ * journal and index only when they already exist (never creates them), like
+ * `status`/`doctor`. `--json` emits the `RecapModel` for piping.
+ */
+export async function cmdRecap(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const journalPath = join(rt.root, rt.config.paths.journal);
+  const indexPath = join(rt.root, rt.config.paths.index);
+  const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
+  // Health history lives in the index store; absent ⇒ no trend (recap still
+  // works off the journal alone). Guarded so a recap creates no db.
+  const store = existsSync(indexPath) ? new IndexStore(indexPath) : undefined;
+  try {
+    // Scan a generous window so multi-entry runs are reconstructed whole; the
+    // formatter caps how many runs are listed.
+    const model = recap(journal.recent(200), store?.loadHealthHistory() ?? []);
+    if (opts.json) console.log(JSON.stringify(model, null, 2));
+    else console.log(formatRecap(model));
+  } finally {
+    journal.close();
+    store?.close();
   }
 }
 

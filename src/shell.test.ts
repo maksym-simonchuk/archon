@@ -76,6 +76,17 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/recap reports no runs before anything is journaled', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/recap')).toBe(true);
+      expect(text(log)).toContain('no runs journaled yet');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/boundaries reports no index before one is built', async () => {
     const rt = await runtime();
     const log = captured();
