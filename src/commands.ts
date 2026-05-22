@@ -553,6 +553,32 @@ export async function cmdSkills(rt: Runtime, name?: string): Promise<void> {
 }
 
 /**
+ * Run a command from the shell THROUGH the Capability Broker, so the active
+ * policy decides: dev commands (`npm`, `node`, `tsc`, `git status`/`diff`/`add`/
+ * `commit`) run under `safe`; risky ones (`git checkout`/`merge`) are refused as
+ * `ask`; destructive ones (`rm -rf`, `git push --force`) are denied. There is no
+ * OS shell — the line is split into argv and handed to `execFile`, so no
+ * pipes/redirects/globs and no shell-injection surface. This puts the very gate
+ * the agent obeys at the operator's fingertips. See ADR-0003.
+ */
+export async function cmdSh(rt: Runtime, command: string): Promise<void> {
+  const argv = command.split(/\s+/).filter(Boolean);
+  if (argv.length === 0) {
+    console.log('usage: /sh <command> [args…]  (policy-gated; no shell — argv only)');
+    return;
+  }
+  const res = await rt.brokerAt(rt.root).exec(argv, { reason: 'interactive /sh' });
+  if (!res.ok) {
+    // policy.deny / policy.ask (refused before running) or exec.failed (ran, exited non-zero)
+    console.error(`  ✗ ${res.error.code}: ${res.error.message}`);
+    return;
+  }
+  if (res.value.stdout) process.stdout.write(res.value.stdout);
+  if (res.value.stderr) process.stderr.write(res.value.stderr);
+  if (!res.value.stdout && !res.value.stderr) console.log('  ✓ ok (no output)');
+}
+
+/**
  * Invoke a loaded `tool` plugin by name; the optional argument is JSON parsed
  * into the tool input. The host enforces the plugin's declared capabilities
  * against the active policy *before* it runs, so a tool wanting a capability the
