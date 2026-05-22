@@ -179,6 +179,10 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       journal: journal(),
       executorFor: (worktree, taskId) => new Executor(brokerAt(worktree, 'trusted'), taskId),
       verifierFor: (worktree) => new Verifier(brokerAt(worktree, 'trusted')),
+      // Verifier plugins run under the host's (config-profile) broker, so one
+      // needing a capability the profile won't grant stays inert rather than
+      // gaining the loop's trusted authority — plugins tighten, never widen.
+      verifierPlugins: async (files) => (await pluginHost()).runVerifiers(files),
       cost: () => router.spent,
     });
 

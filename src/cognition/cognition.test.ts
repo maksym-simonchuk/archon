@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { PlanStep, Task } from '../core/types';
+import type { PlanStep, Task, Verdict } from '../core/types';
 import { AuditLog } from '../effecting/audit-log';
 import { CapabilityBroker } from '../effecting/capability-broker';
 import { loadPolicy, PolicyEngine } from '../effecting/policy-engine';
@@ -51,6 +51,7 @@ function loopFor(
   memory: MemoryStore,
   journal: TaskJournal,
   cost?: () => number,
+  verifierPlugins?: (files: string[]) => Promise<Verdict[]>,
 ): CognitionLoop {
   const audit = new AuditLog();
   // `trusted` so worktree/merge git ops are permitted; the broker still gates each.
@@ -63,6 +64,7 @@ function loopFor(
     journal,
     executorFor: (worktree, taskId) => new Executor(brokerAt(worktree), taskId),
     verifierFor: (worktree) => new Verifier(brokerAt(worktree)),
+    verifierPlugins,
     cost,
   });
 }
@@ -142,6 +144,50 @@ describe('CognitionLoop (M6)', () => {
     const results = await loopFor(repo, wt, failing, memory, journal).run(task('bad task'));
     expect(results.some((r) => !r.verdict.passed)).toBe(true);
     expect(await exists(join(repo, 'archon-demo', 'x.mjs'))).toBe(false); // never merged
+    memory.close();
+    journal.close();
+  });
+
+  it('folds a passing verifier-plugin verdict into a clean run (additive, still merges)', async () => {
+    repo = await initRepo();
+    wt = await mkdtemp(join(tmpdir(), 'archon-cwt-'));
+    const memory = new MemoryStore(':memory:');
+    const journal = new TaskJournal(':memory:');
+    const seen: string[][] = [];
+    const passing = async (files: string[]): Promise<Verdict[]> => {
+      seen.push(files);
+      return [{ passed: true, checks: [{ name: 'plugin:ok', passed: true }] }];
+    };
+    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal, undefined, passing).run(
+      task('add function greet'),
+    );
+
+    const verify = results.find((r) => r.stepId.includes('verify'));
+    expect(verify?.verdict.passed).toBe(true);
+    expect(verify?.verdict.checks.some((c) => c.name === 'plugin:ok')).toBe(true); // plugin checks accumulate
+    expect(seen[0]?.length).toBeGreaterThan(0); // the plugin received the run's changed files
+    expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(true); // merged
+    memory.close();
+    journal.close();
+  });
+
+  it('discards an otherwise-clean run when a verifier plugin vetoes it (plugins only tighten)', async () => {
+    repo = await initRepo();
+    wt = await mkdtemp(join(tmpdir(), 'archon-cwt-'));
+    const memory = new MemoryStore(':memory:');
+    const journal = new TaskJournal(':memory:');
+    // Built-in checks pass, but a plugin verdict fails — AND must discard the run.
+    const veto = async (): Promise<Verdict[]> => [
+      { passed: false, checks: [{ name: 'plugin:veto', passed: false, output: 'rejected by plugin' }] },
+    ];
+    const results = await loopFor(repo, wt, new ScaffoldStrategy(), memory, journal, undefined, veto).run(
+      task('add function greet'),
+    );
+
+    const verify = results.find((r) => r.stepId.includes('verify'));
+    expect(verify?.verdict.passed).toBe(false);
+    expect(verify?.verdict.checks.some((c) => c.name === 'plugin:veto')).toBe(true);
+    expect(await exists(join(repo, 'archon-demo', 'greet.mjs'))).toBe(false); // vetoed ⇒ never merged
     memory.close();
     journal.close();
   });

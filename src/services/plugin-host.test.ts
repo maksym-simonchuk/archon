@@ -7,7 +7,7 @@ import type { CapabilityAction } from '../core/types';
 import { AuditLog } from '../effecting/audit-log';
 import { CapabilityBroker } from '../effecting/capability-broker';
 import { loadPolicy, PolicyEngine } from '../effecting/policy-engine';
-import type { Plugin, ToolPlugin } from '../plugins/abi';
+import type { Plugin, ToolPlugin, VerifierPlugin } from '../plugins/abi';
 import { PluginHost } from './plugin-host';
 
 const doc = loadPolicy(readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8'));
@@ -19,6 +19,12 @@ const tool = (
   capabilities: CapabilityAction[],
   run: ToolPlugin['run'] = async (i) => i,
 ): Plugin => ({ kind: 'tool', manifest: { name, version: '0.0.0', kind: 'tool', capabilities }, run });
+
+const verifier = (name: string, capabilities: CapabilityAction[], verify: VerifierPlugin['verify']): Plugin => ({
+  kind: 'verifier',
+  manifest: { name, version: '0.0.0', kind: 'verifier', capabilities },
+  verify,
+});
 
 describe('PluginHost (M7)', () => {
   it('runs a tool whose declared capabilities the policy grants', async () => {
@@ -61,5 +67,40 @@ describe('PluginHost (M7)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('PluginHost.runVerifiers (M7)', () => {
+  it('runs granted verifier plugins, one verdict each, ignoring non-verifiers', async () => {
+    const host = new PluginHost(broker());
+    host.register(tool('reader', ['fs.read'])); // a tool — must not be run as a verifier
+    host.register(
+      verifier('shape', ['fs.read'], async (files) => ({
+        passed: files.includes('src/a.ts'),
+        checks: [{ name: 'shape', passed: files.includes('src/a.ts') }],
+      })),
+    );
+    const verdicts = await host.runVerifiers(['src/a.ts']);
+    expect(verdicts).toHaveLength(1); // only the verifier kind participates
+    expect(verdicts[0]?.passed).toBe(true); // and it received the changed files
+  });
+
+  it('treats a throwing verifier as a failed verdict (fail-safe, blocks the merge)', async () => {
+    const host = new PluginHost(broker());
+    host.register(
+      verifier('boom', ['fs.read'], async () => {
+        throw new Error('verifier crashed');
+      }),
+    );
+    const [verdict] = await host.runVerifiers([]);
+    expect(verdict?.passed).toBe(false);
+    expect(verdict?.checks[0]?.output).toContain('verifier crashed');
+  });
+
+  it('skips a verifier whose capability the policy will not grant (inert, not blocking)', async () => {
+    const host = new PluginHost(broker());
+    // safe profile only *asks* on net, so this verifier is refused → excluded.
+    host.register(verifier('net-verifier', ['net'], async () => ({ passed: false, checks: [] })));
+    expect(await host.runVerifiers([])).toEqual([]);
   });
 });
