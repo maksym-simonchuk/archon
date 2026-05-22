@@ -159,10 +159,11 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Shipped: pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand; `/watch --loop` starts an unref'd in-process background poller (2s) in the line shell that reindexes + refreshes health without re-running a command, `/watch --stop` ends it. `dirtyPaths` now degrades to `[]` outside a git repo, like `commitHistory`.
 - Deferred: a real FS-event watcher (vs git-status polling), AST-segment-level invalidation, and `--loop` inside the full-screen TUI render loop (the line shell carries the daemon for now; the TUI gets the single-tick `/watch`).
 
-#### M23 — Provider Orchestration completion ⬜
+#### M23 — Provider Orchestration completion ✅
 - Goal: route each task to the provider that fits it.
 - Build: add Gemini + local-model provider clients; task-based routing (Claude → architecture reasoning / deep context, OpenAI → structured tool execution, Gemini → large-repo ingestion, local → cheap background analysis).
 - Deps: M7. Exit: a large-ingestion task routes to Gemini, a background scan to a local model, with fallback.
+- Done: `@ai-sdk/google` added; `createAiClient` now covers `anthropic | openai | google | local` — Gemini via the Google generative-language endpoint, `local` reusing the OpenAI chat protocol against a configurable base URL (`ARCHON_LOCAL_BASE_URL`, default `http://localhost:11434/v1`, keyless). Catalog gains `gemini-2.0-flash` (1M ctx) + `gemini-1.5-pro` (2M ctx); `local` model ids are user-named and synthesized free (cost 0). Runtime `PROVIDER_ENV`/`KEYLESS_PROVIDERS`/`providerStatus` updated; the router's existing strength-scored selection + budget breaker + fallback chain now spans all four. Tests inject `fetch` — no real network (Gemini-endpoint + local-baseURL routing asserted; `resolveModels` catalog + local-synthesis covered).
 
 #### M24 — Rust core: tree-sitter + vector store ⬜
 - Goal: production-grade parsing + semantic memory.
@@ -182,7 +183,7 @@ Not all 17 milestones are needed to demonstrate the thesis. Suggested cut:
   + M13 → M14 → M17. Risk-scaled autonomy + preservation + intent-scoped context.
 - **Autonomy MVP** (proves "conservative evolution"): + M19 → M21. One real
   `safe-refactor` / `improve` flow end-to-end.
-- **Production**: M11, M15, M16, M18, M20, M22, M23, M24 — depth, prediction,
+- **Production**: M11, M15, M16, M18, M20, M22, M24 — depth, prediction,
   generated agents, daemon, full provider mesh, accurate parsing.
 
 ## 4. Critical path
