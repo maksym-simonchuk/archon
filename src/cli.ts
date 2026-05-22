@@ -30,7 +30,7 @@ Usage:
   archon                  Launch the interactive shell
   archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
-  archon plan [--skill <name>] <goal>   Produce a plan tree — no writes (M6)
+  archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
   archon status [--json] [taskId]   Task journal — or one run's replay   (M0)
@@ -77,9 +77,9 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime(cmdIndex);
     case 'plan': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
-      const g = r.join(' ').trim();
-      if (!g) return usageError('plan [--skill <name>] <goal>');
-      return withRuntime((rt) => cmdPlan(rt, g, { skill }));
+      const g = r.filter((a) => a !== '--json').join(' ').trim();
+      if (!g) return usageError('plan [--skill <name>] [--json] <goal>');
+      return withRuntime((rt) => cmdPlan(rt, g, { skill, json }));
     }
     case 'run': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');

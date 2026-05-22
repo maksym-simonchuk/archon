@@ -136,7 +136,8 @@ export function extractFileRefs(text: string): string[] {
  * context block. Routing reads through the broker (not raw `fs`) is the whole
  * point: `@.env` and other secret globs are denied by policy, so a file destined
  * for an external LLM prompt can't become an exfil path; repo-escape is blocked
- * too. Each decision is surfaced to the user, and oversized files are truncated.
+ * too. Each decision is surfaced to the user on stderr (diagnostics, not data —
+ * so `plan --json` / `ask` stay pipeable), and oversized files are truncated.
  */
 async function attachFiles(rt: Runtime, refs: string[]): Promise<string> {
   if (refs.length === 0) return '';
@@ -147,11 +148,11 @@ async function attachFiles(rt: Runtime, refs: string[]): Promise<string> {
     if (r.ok) {
       const body = r.value.length > MAX_FILE_CHARS ? `${r.value.slice(0, MAX_FILE_CHARS)}\n…(truncated)\n` : r.value;
       blocks.push(`# File: ${ref}\n${FENCE}\n${body}${FENCE}`);
-      console.log(`  + attached @${ref} (${r.value.length} chars)`);
+      console.error(`  + attached @${ref} (${r.value.length} chars)`);
     } else {
       const why = r.error.message ?? r.error.code;
       blocks.push(`# File: ${ref}\n(unavailable: ${why})`);
-      console.log(`  ⚠ skipped @${ref}: ${why}`);
+      console.error(`  ⚠ skipped @${ref}: ${why}`);
     }
   }
   return `Attached files:\n${blocks.join('\n\n')}\n\n`;
@@ -208,10 +209,10 @@ async function skillPlaybook(rt: Runtime, name: string): Promise<string> {
     .list()
     .find((p): p is SkillPlugin => p.kind === 'skill' && p.manifest.name === name);
   if (!skill) {
-    console.log(`  ⚠ skill "${name}" not loaded — planning without it (\`archon skills\` lists them)`);
+    console.error(`  ⚠ skill "${name}" not loaded — planning without it (\`archon skills\` lists them)`);
     return '';
   }
-  console.log(`  + applying skill "${name}"`);
+  console.error(`  + applying skill "${name}"`);
   return `# Skill: ${skill.manifest.name}\nApply this playbook where it fits the task:\n${skill.playbook}\n\n`;
 }
 
@@ -230,10 +231,31 @@ export async function planContext(rt: Runtime, task: Task, goal: string, skill?:
   return playbook + attached + (await rt.context(task));
 }
 
-export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {
-  console.log(plannerLabel(rt.llmPlanning));
+/** Machine-readable shape of `archon plan --json` (a stable automation contract). */
+export interface PlanReport {
+  taskId: string;
+  rationale: string;
+  steps: { intent: string; action: string; target: string }[];
+  checks: { name: string; argv: string[] }[];
+}
+
+export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string; json?: boolean } = {}): Promise<void> {
   const task = makeTask(goal, rt.config.profile);
-  printPlan(await rt.planner().plan(task, await planContext(rt, task, goal, opts.skill)));
+  const cog = await rt.planner().plan(task, await planContext(rt, task, goal, opts.skill));
+  if (opts.json) {
+    // stdout carries only this document — diagnostics (@file / --skill notes) go
+    // to stderr — so `archon plan --json | jq` is safe.
+    const report: PlanReport = {
+      taskId: cog.plan.taskId,
+      rationale: cog.plan.rationale,
+      steps: cog.plan.steps.map((s) => ({ intent: s.intent, action: s.capability.action, target: s.capability.target })),
+      checks: cog.checks.map((c) => ({ name: c.name, argv: c.argv })),
+    };
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  console.log(plannerLabel(rt.llmPlanning));
+  printPlan(cog);
 }
 
 export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {

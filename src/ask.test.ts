@@ -160,13 +160,13 @@ describe('cmdAsk @file context', () => {
     dir = await mkdtemp(join(tmpdir(), 'archon-ask-'));
     await writeFile(join(dir, '.env'), 'OPENAI_API_KEY=sk-do-not-leak');
     muteStdout();
-    const log = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined); // the deny note is a stderr diagnostic
     const { client, lastPrompt } = streamingClient();
 
     await cmdAsk(brokerRt(new ProviderRouter([model], [client]), dir), 'print @.env');
 
     expect(lastPrompt()).not.toContain('sk-do-not-leak'); // the secret is never sent to the model
     expect(lastPrompt()).toContain('unavailable');
-    expect(log.mock.calls.flat().join('\n')).toContain('skipped @.env');
+    expect(err.mock.calls.flat().join('\n')).toContain('skipped @.env');
   });
 });
