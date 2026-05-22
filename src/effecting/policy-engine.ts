@@ -142,6 +142,41 @@ export class PolicyEngine {
     this.profileName = profile ?? doc.active_profile;
   }
 
+  /**
+   * A read-only summary of the active profile for `archon policy`: the
+   * inheritance chain (most-derived → base) and every rule it contributes,
+   * grouped per profile in precedence order (deny, then ask, then allow). A rule
+   * carrying a `when:` clause is flagged `conditional`. Evaluation is unaffected —
+   * this is purely for introspection of the constraint surface.
+   */
+  describe(): {
+    profile: Profile;
+    chain: string[];
+    rules: { decision: PolicyDecision; action: CapabilityRequest['action']; target: string; conditional: boolean }[];
+  } {
+    const chain = this.profileChain(this.profileName);
+    const rules: {
+      decision: PolicyDecision;
+      action: CapabilityRequest['action'];
+      target: string;
+      conditional: boolean;
+    }[] = [];
+    for (const name of chain) {
+      const own = this.rulesOf(name);
+      for (const decision of ['deny', 'ask', 'allow'] as const) {
+        for (const rule of own[decision]) {
+          rules.push({
+            decision,
+            action: rule.action,
+            target: asArray(rule.target).join(', ') || '(any target)',
+            conditional: rule.when !== undefined,
+          });
+        }
+      }
+    }
+    return { profile: this.profileName, chain, rules };
+  }
+
   evaluate(req: CapabilityRequest, ctx: PolicyEvalContext = {}): PolicyVerdict {
     const files = req.blastRadius?.files.length ?? 0;
 

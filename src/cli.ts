@@ -15,6 +15,7 @@ import {
   cmdModel,
   cmdPlan,
   cmdPlugins,
+  cmdPolicy,
   cmdPromote,
   cmdPromotions,
   cmdRun,
@@ -44,6 +45,7 @@ Usage:
   archon model            Show the provider routing table                (M7)
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
+  archon policy [check <cmd>]   Show the safety policy, or dry-run a command
   archon plugins          List loaded plugins + capability previews     (M7)
   archon skills [name]    List skill playbooks, or print one            (M7)
   archon tool <name> [json]    Invoke a tool plugin (policy-gated)       (M7)
@@ -127,6 +129,16 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdDoctor(rt, { json }));
     case 'model':
       return withRuntime((rt) => cmdModel(rt));
+    case 'policy': {
+      const [sub, ...more] = rest;
+      if (sub === 'check') {
+        const command = more.join(' ').trim();
+        if (!command) return usageError('policy check <command>');
+        return withRuntime((rt) => cmdPolicy(rt, { check: command }));
+      }
+      if (sub) return usageError('policy [check <command>]');
+      return withRuntime((rt) => cmdPolicy(rt));
+    }
     case 'plugins':
       return withRuntime(cmdPlugins);
     case 'skills': {

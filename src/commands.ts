@@ -5,7 +5,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
-import type { JournalEntry, Profile, StepResult, Task } from './core/types';
+import type { JournalEntry, PolicyDecision, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
@@ -715,6 +715,46 @@ export async function cmdSh(rt: Runtime, command: string): Promise<void> {
   if (res.value.stdout) process.stdout.write(res.value.stdout);
   if (res.value.stderr) process.stderr.write(res.value.stderr);
   if (!res.value.stdout && !res.value.stderr) console.log('  ✓ ok (no output)');
+}
+
+/** Decision glyph: ✓ allow · ? ask · ✗ deny — the same vocabulary across the gate's surfaces. */
+const decisionGlyph = (d: PolicyDecision): string => (d === 'allow' ? '✓' : d === 'ask' ? '?' : '✗');
+
+/**
+ * Make the safety layer observable. With no argument: the active profile, its
+ * inheritance chain, and every allow/ask/deny rule in effect — the constraint
+ * surface the agent runs under, including the destructive `deny`s and secret-read
+ * blocks. With `check <command>`: dry-run that command through the very gate the
+ * broker uses, printing the decision and the rule that fired, WITHOUT executing it
+ * — the non-running twin of `/sh`. Strictly read-only (no broker, no effect). See
+ * ADR-0003.
+ */
+export async function cmdPolicy(rt: Runtime, opts: { check?: string } = {}): Promise<void> {
+  const engine = rt.policy();
+  if (opts.check !== undefined) {
+    const command = opts.check.trim();
+    if (!command) {
+      console.log('usage: policy check <command>  (dry-run — does not execute)');
+      return;
+    }
+    const v = engine.evaluate({ action: 'exec', target: command, reason: 'policy check (dry-run)' });
+    console.log(`${decisionGlyph(v.decision)} ${v.decision}: ${command}`);
+    console.log(`  rule: ${v.rule}`);
+    if (v.decision !== 'allow') console.log(`  ${v.message}`);
+    return;
+  }
+  const { profile, chain, rules } = engine.describe();
+  const inherits = chain.length > 1 ? ` (inherits ${chain.slice(1).join(' → ')})` : '';
+  console.log(`policy: profile "${profile}"${inherits}`);
+  if (rules.length === 0) {
+    console.log('  (no rules — everything is default-denied)');
+    return;
+  }
+  for (const r of rules) {
+    const cond = r.conditional ? '  (conditional)' : '';
+    console.log(`  ${decisionGlyph(r.decision)} ${r.decision.padEnd(5)} ${r.action.padEnd(11)} ${r.target}${cond}`);
+  }
+  console.log('  (deny > ask > allow; anything unmatched is denied)');
 }
 
 /**

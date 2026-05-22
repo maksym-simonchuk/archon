@@ -14,6 +14,7 @@ import {
   cmdModel,
   cmdPlan,
   cmdPlugins,
+  cmdPolicy,
   cmdPromote,
   cmdPromotions,
   cmdRun,
@@ -59,6 +60,7 @@ const COMMANDS = [
   '/plugins',
   '/skills',
   '/sh',
+  '/policy',
   '/tool',
   '/help',
   '/exit',
@@ -83,6 +85,7 @@ const SHELL_HELP = `commands:
   /plugins         list loaded plugins + capability previews
   /skills [name]   list skill playbooks · <name>: print one
   /sh <command>    run a command through the policy broker (gated; argv only)
+  /policy [check <cmd>]  show the safety policy · check: dry-run a command
   /tool <name> [json]  invoke a tool plugin (policy-gated)
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
@@ -218,6 +221,13 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       if (arg) await cmdSh(rt, arg);
       else console.log('usage: /sh <command> [args…]');
       return true;
+    case '/policy': {
+      const [sub, ...more] = rest;
+      if (sub === 'check') await cmdPolicy(rt, { check: more.join(' ').trim() });
+      else if (sub) console.log('usage: /policy [check <command>]');
+      else await cmdPolicy(rt);
+      return true;
+    }
     case '/tool': {
       const [name, ...more] = rest;
       if (!name) console.log('usage: /tool <name> [json-input]');
