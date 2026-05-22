@@ -934,18 +934,28 @@ const decisionGlyph = (d: PolicyDecision): string => (d === 'allow' ? '✓' : d 
  * — the non-running twin of `/sh`. Strictly read-only (no broker, no effect). See
  * ADR-0003.
  */
-export async function cmdPolicy(rt: Runtime, opts: { check?: string } = {}): Promise<void> {
+export async function cmdPolicy(rt: Runtime, opts: { check?: string; json?: boolean } = {}): Promise<void> {
   const engine = rt.policy();
   if (opts.check !== undefined) {
     const command = opts.check.trim();
     if (!command) {
-      console.log('usage: policy check <command>  (dry-run — does not execute)');
+      if (!opts.json) console.log('usage: policy check <command>  (dry-run — does not execute)');
       return;
     }
+    // The verdict IS the contract — { decision, rule, message } — so an agent can
+    // gate an action with `archon policy check --json '<cmd>' | jq .decision`.
     const v = engine.evaluate({ action: 'exec', target: command, reason: 'policy check (dry-run)' });
+    if (opts.json) {
+      console.log(JSON.stringify(v, null, 2));
+      return;
+    }
     console.log(`${decisionGlyph(v.decision)} ${v.decision}: ${command}`);
     console.log(`  rule: ${v.rule}`);
     if (v.decision !== 'allow') console.log(`  ${v.message}`);
+    return;
+  }
+  if (opts.json) {
+    console.log(JSON.stringify(engine.describe(), null, 2));
     return;
   }
   const { profile, chain, rules } = engine.describe();

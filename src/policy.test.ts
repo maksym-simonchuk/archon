@@ -75,4 +75,28 @@ describe('archon policy (constraint introspection)', () => {
     expect(text(log)).toContain('usage: policy check');
     rt.close();
   });
+
+  it('emits the verdict as JSON for a programmatic permission gate', async () => {
+    const rt = await runtime();
+    const log = captured();
+    await cmdPolicy(rt, { check: 'rm -rf /tmp/x', json: true });
+    const verdict = JSON.parse(text(log)); // stdout is exactly one JSON document
+
+    expect(verdict.decision).toBe('deny');
+    expect(typeof verdict.rule).toBe('string');
+    expect(typeof verdict.message).toBe('string');
+    rt.close();
+  });
+
+  it('emits the active profile and rules as JSON with no argument', async () => {
+    const rt = await runtime();
+    const log = captured();
+    await cmdPolicy(rt, { json: true });
+    const report = JSON.parse(text(log));
+
+    expect(report.profile).toBe('safe');
+    expect(Array.isArray(report.chain)).toBe(true);
+    expect(report.rules.some((r: { decision: string }) => r.decision === 'deny')).toBe(true);
+    rt.close();
+  });
 });

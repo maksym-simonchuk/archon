@@ -49,7 +49,7 @@ Usage:
   archon memory           List memory-promotion candidates              (M5)
   archon memory list [tier]    Inspect stored records (by tier)         (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
-  archon policy [check <cmd>]   Show the safety policy, or dry-run a command
+  archon policy [--json] [check <cmd>]   Show the policy, or dry-run a command
   archon plugins          List loaded plugins + capability previews     (M7)
   archon skills [name]    List skill playbooks, or print one            (M7)
   archon tool <name> [json]    Invoke a tool plugin (policy-gated)       (M7)
@@ -139,14 +139,14 @@ async function main(argv: string[]): Promise<void> {
     case 'model':
       return withRuntime((rt) => cmdModel(rt));
     case 'policy': {
-      const [sub, ...more] = rest;
+      const [sub, ...more] = rest.filter((a) => a !== '--json'); // pull --json out before parsing
       if (sub === 'check') {
         const command = more.join(' ').trim();
-        if (!command) return usageError('policy check <command>');
-        return withRuntime((rt) => cmdPolicy(rt, { check: command }));
+        if (!command) return usageError('policy check [--json] <command>');
+        return withRuntime((rt) => cmdPolicy(rt, { check: command, json }));
       }
-      if (sub) return usageError('policy [check <command>]');
-      return withRuntime((rt) => cmdPolicy(rt));
+      if (sub) return usageError('policy [--json] [check <command>]');
+      return withRuntime((rt) => cmdPolicy(rt, { json }));
     }
     case 'plugins':
       return withRuntime(cmdPlugins);
