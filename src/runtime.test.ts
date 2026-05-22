@@ -87,6 +87,25 @@ describe('buildRuntime (composition root)', () => {
     }
   });
 
+  it('folds retriever-plugin hits into the LLM context', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-test');
+    const root = await repo({ providers: [{ id: 'anthropic', models: ['claude-haiku-4-5-20251001'] }] });
+    await mkdir(join(root, '.archon/plugins/marker'), { recursive: true });
+    await writeFile(
+      join(root, '.archon/plugins/marker/plugin.mjs'),
+      "export const plugin = { kind: 'retriever', manifest: { name: 'marker', version: '0', kind: 'retriever', capabilities: [] }, retrieve: async (q) => ['MARKER_HIT for ' + q] };\n",
+    );
+
+    const runtime = await buildRuntime(root);
+    try {
+      const ctx = await runtime.context(task);
+      expect(ctx).toContain('Plugin retrievers');
+      expect(ctx).toContain('MARKER_HIT for add a widget');
+    } finally {
+      runtime.close();
+    }
+  });
+
   it('degrades to the scaffolder when the provider key is absent', async () => {
     vi.stubEnv('ANTHROPIC_API_KEY', '');
     const runtime = await buildRuntime(

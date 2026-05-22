@@ -167,4 +167,25 @@ export class PluginHost {
     }
     return granted;
   }
+
+  /**
+   * Gather hits from every loaded `retriever`-kind plugin whose capabilities the
+   * policy grants (refused ⇒ skipped). Hits are flattened in registration order;
+   * a throwing retriever contributes nothing (fail-safe — a broken plugin must
+   * never break context assembly). The runtime folds these into the planner
+   * context alongside the built-in memory + repo-map retrieval.
+   */
+  async runRetrievers(query: string, k: number): Promise<string[]> {
+    const hits: string[] = [];
+    for (const plugin of this.plugins.values()) {
+      if (plugin.kind !== 'retriever') continue;
+      if (await this.firstRefusal(plugin.manifest.name, plugin.manifest.capabilities)) continue;
+      try {
+        hits.push(...(await plugin.retrieve(query, k)));
+      } catch {
+        // a failing retriever yields no hits — context assembly carries on
+      }
+    }
+    return hits;
+  }
 }

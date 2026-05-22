@@ -7,7 +7,7 @@ import type { CapabilityAction } from '../core/types';
 import { AuditLog } from '../effecting/audit-log';
 import { CapabilityBroker } from '../effecting/capability-broker';
 import { loadPolicy, PolicyEngine } from '../effecting/policy-engine';
-import type { Plugin, ProviderPlugin, ToolPlugin, VerifierPlugin } from '../plugins/abi';
+import type { Plugin, ProviderPlugin, RetrieverPlugin, ToolPlugin, VerifierPlugin } from '../plugins/abi';
 import { PluginHost } from './plugin-host';
 
 const doc = loadPolicy(readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8'));
@@ -38,6 +38,12 @@ const echoComplete: ProviderPlugin['complete'] = async (req) => ({
   outputTokens: 0,
   costUsd: 0,
   cached: false,
+});
+
+const retriever = (name: string, capabilities: CapabilityAction[], retrieve: RetrieverPlugin['retrieve']): Plugin => ({
+  kind: 'retriever',
+  manifest: { name, version: '0.0.0', kind: 'retriever', capabilities },
+  retrieve,
 });
 
 describe('PluginHost (M7)', () => {
@@ -127,5 +133,26 @@ describe('PluginHost.providerPlugins (ADR-0012)', () => {
     host.register(verifier('v', ['fs.read'], async () => ({ passed: true, checks: [] }))); // wrong kind
     const provs = await host.providerPlugins();
     expect(provs.map((p) => p.manifest.name)).toEqual(['local']);
+  });
+});
+
+describe('PluginHost.runRetrievers', () => {
+  it('flattens hits from granted retrievers, skipping other kinds and refused ones', async () => {
+    const host = new PluginHost(broker());
+    host.register(retriever('docs', ['fs.read'], async (q, k) => [`docs:${q}:${k}`]));
+    host.register(retriever('net-r', ['net'], async () => ['SHOULD-NOT-APPEAR'])); // refused under safe
+    host.register(verifier('v', ['fs.read'], async () => ({ passed: true, checks: [] }))); // wrong kind
+    expect(await host.runRetrievers('q', 3)).toEqual(['docs:q:3']);
+  });
+
+  it('a throwing retriever contributes nothing (fail-safe), others still count', async () => {
+    const host = new PluginHost(broker());
+    host.register(
+      retriever('boom', ['fs.read'], async () => {
+        throw new Error('down');
+      }),
+    );
+    host.register(retriever('ok', ['fs.read'], async () => ['hit']));
+    expect(await host.runRetrievers('q', 1)).toEqual(['hit']);
   });
 });

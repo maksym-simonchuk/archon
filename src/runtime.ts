@@ -164,12 +164,24 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return hits.length ? `# Relevant prior runs for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
   };
 
+  // Hits from external retriever-kind plugins (e.g. a vector DB or docs index),
+  // cap-gated by the host; a refused/failing plugin simply contributes nothing.
+  const pluginRetrieverContext = async (task: Task): Promise<string> => {
+    const hits = await (await pluginHost()).runRetrievers(task.goal, 3);
+    return hits.length ? `# Plugin retrievers for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
+  };
+
   const context = async (task: Task): Promise<string> => {
     // The deterministic scaffolder ignores context, so don't pay to load the
-    // index / WASM / memory for it. Returning '' also keeps a dry-run `plan`
-    // writeless. Memory (prior runs) is ordered ahead of the repo map.
+    // index / WASM / memory / plugins for it. Returning '' also keeps a dry-run
+    // `plan` writeless. Memory (prior runs) is ordered ahead of the repo map,
+    // then any retriever-plugin hits.
     if (!llmPlanning) return '';
-    const sections = [await memoryContext(task), await repoMapContext(task)];
+    const sections = [
+      await memoryContext(task),
+      await repoMapContext(task),
+      await pluginRetrieverContext(task),
+    ];
     return sections.filter((s) => s.length > 0).join('\n');
   };
 
