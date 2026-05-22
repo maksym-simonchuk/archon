@@ -147,7 +147,8 @@ export class CapabilityBroker {
     }
   }
 
-  private record(req: CapabilityRequest, verdict: PolicyVerdict, taskId?: string): void {
+  /** Append a decision to the audit log. `protected` so a scoping subclass (AgentBroker) records its own denials. */
+  protected record(req: CapabilityRequest, verdict: PolicyVerdict, taskId?: string): void {
     this.audit.append({
       taskId: taskId ?? 'unknown',
       ts: new Date().toISOString(),

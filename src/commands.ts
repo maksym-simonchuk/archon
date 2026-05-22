@@ -18,7 +18,8 @@ import { type FileRisk, formatRisk, scoreRisk } from './cognition/risk';
 import { analyzeStructure } from './sensing/structural-analyzer';
 import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile, type PhilosophySignals } from './sensing/philosophy';
 import { assessPreservation, type ChangeKind, formatPreservation } from './cognition/preservation';
-import { formatAgents, generateAgents } from './cognition/agent-factory';
+import { type AgentSpec, formatAgents, generateAgents } from './cognition/agent-factory';
+import { agentBriefing, selectAgent } from './cognition/agent-runtime';
 import { formatImprovements, proposeImprovements } from './cognition/improve';
 import { formatSimulation, simulateExecution } from './cognition/simulation';
 import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
@@ -837,14 +838,60 @@ export async function cmdAgents(rt: Runtime, opts: { json?: boolean } = {}): Pro
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
-    const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
-    const agents = generateAgents(fingerprint, model, philosophy);
+    const agents = await agentRoster(rt, store);
     if (opts.json) console.log(JSON.stringify(agents, null, 2));
     else console.log(formatAgents(agents));
   } finally {
     store.close();
   }
+}
+
+/** Assemble the project-native agent roster from the index (shared by `agents` + `agent`). */
+async function agentRoster(rt: Runtime, store: IndexStore): Promise<AgentSpec[]> {
+  const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+  const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+  return generateAgents(fingerprint, model, philosophy);
+}
+
+/**
+ * Bind a project-native agent to a goal and drive it (M18 runtime). Selects the
+ * agent whose scope/triggers best fit the goal, prepends its mandate (rules,
+ * scope, capability ceiling) to the planner context, and either previews the
+ * constrained plan (default) or runs it under a broker scoped to the agent's
+ * declared capabilities (`--run`) — so the agent can never write more than its
+ * spec allows. A read-only agent (e.g. architecture-review) can plan but its
+ * writes are denied at the broker, so the run discards rather than merges.
+ */
+export async function cmdAgentRun(rt: Runtime, goal: string, opts: { run?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('agent: no index yet — run `archon index` then `archon init`');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  let agent: AgentSpec | undefined;
+  try {
+    agent = selectAgent(await agentRoster(rt, store), goal);
+  } finally {
+    store.close();
+  }
+  if (!agent) {
+    console.log('agent: none generated — run `archon index` then `archon init` first');
+    return;
+  }
+
+  const task = makeTask(goal, 'trusted');
+  const context = `${agentBriefing(agent)}\n\n${await planContext(rt, task, goal)}`;
+  console.log(`agent: ${agent.id} (${agent.capabilities.join(', ')} · escalate ≥ ${agent.escalateAtRisk})`);
+  if (!opts.run) {
+    console.log(plannerLabel(rt.llmPlanning));
+    printPlan(await rt.planner().plan(task, context));
+    console.log(`  to execute under this agent: /agent --run ${goal}`);
+    return;
+  }
+  console.log(`run ${task.id}: ${goal}`);
+  printResults(await rt.loop(agent).run(task, context));
+  console.log(`  replay: archon status ${task.id}`);
 }
 
 /**

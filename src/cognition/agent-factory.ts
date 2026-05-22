@@ -9,10 +9,11 @@ import type { PhilosophyProfile } from '../sensing/philosophy';
  * its trigger frameworks, the rules it enforces, the modules it is scoped to, the
  * capabilities it may request, and the risk ceiling above which it must escalate.
  *
- * Pure: takes the three models, returns specs. The spec is a *declaration* an
- * orchestrator can later bind to a prompt + the broker; this milestone produces
- * and renders the declarations (the `agents` command), not a runtime that drives
- * them — that binding plugs into the cognition loop in a later milestone.
+ * Pure: takes the three models, returns specs. The spec is a *declaration*; the
+ * runtime that binds it to a prompt + a capability-scoped broker session and
+ * drives the loop lives in `agent-runtime.ts` (`selectAgent` / `agentBriefing`)
+ * + `effecting/agent-broker.ts` (the `/agent` command). This module just
+ * generates and renders the declarations (the `agents` command).
  */
 
 export type AgentRisk = 'low' | 'medium' | 'high';

@@ -152,6 +152,28 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/agent asks for a goal when given none', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/agent')).toBe(true);
+      expect(text(log)).toContain('usage: /agent [--run] <goal>');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/agent reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/agent fix the routing')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/risk asks for a file when given none', async () => {
     const rt = await runtime();
     const log = captured();

@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createInterface, moveCursor } from 'node:readline';
 import {
   type AskTurn,
+  cmdAgentRun,
   cmdAgents,
   cmdAsk,
   cmdBoundaries,
@@ -78,6 +79,7 @@ export const COMMANDS = [
   '/philosophy',
   '/preserve',
   '/agents',
+  '/agent',
   '/improve',
   '/hooks',
   '/simulate',
@@ -116,6 +118,7 @@ const SHELL_HELP = `commands:
   /philosophy      inferred engineering culture (typing, abstraction, bias, scale)
   /preserve <file> [change]  would a change erase intentional/critical structure?
   /agents          project-native agents the stack + topology imply
+  /agent [--run] <goal>  bind the best-fit agent to a goal — plan under it, or --run to execute scoped
   /improve         conservative, ROI-ranked, preservation-gated improvement proposals
   /hooks           pre-write gate (forbidden-import/boundary/never-modify) + post-write checks
   /simulate <file> [change]  predict blast radius + regression probability before applying
@@ -345,6 +348,13 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/agents':
       await cmdAgents(rt);
       return true;
+    case '/agent': {
+      const run = rest.includes('--run'); // boolean flag — accepted anywhere in the args
+      const g = rest.filter((t) => t !== '--run').join(' ').trim();
+      if (!g) console.log('usage: /agent [--run] <goal>');
+      else await cmdAgentRun(rt, g, { run });
+      return true;
+    }
     case '/improve':
       await cmdImprove(rt);
       return true;

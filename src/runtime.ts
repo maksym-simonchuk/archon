@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { AgentSpec } from './cognition/agent-factory';
 import { CognitionLoop } from './cognition/loop';
 import { Executor } from './cognition/executor';
 import { Planner } from './cognition/planner';
@@ -11,6 +12,7 @@ import type { PlanStrategy } from './cognition/types';
 import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
 import type { MemoryTier, Profile, Task } from './core/types';
+import { AgentBroker } from './effecting/agent-broker';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
@@ -78,8 +80,12 @@ export interface Runtime {
   memory(): MemoryStore;
   /** The shared (lazily-opened) task journal. */
   journal(): TaskJournal;
-  /** Full plan → act → verify → reflect loop, sharing this runtime's memory + journal. */
-  loop(): CognitionLoop;
+  /**
+   * Full plan → act → verify → reflect loop, sharing this runtime's memory +
+   * journal. With an `agent`, the executor's writes are scoped to that agent's
+   * declared capabilities (M18) — it can never write more than its spec allows.
+   */
+  loop(agent?: AgentSpec): CognitionLoop;
   /** A built-in embedding retriever over one memory anchor, registered with the host. */
   retriever(tier: MemoryTier, key: string): Promise<RetrieverPlugin>;
   /** An incremental indexer plus its index store (caller closes the returned store). */
@@ -128,6 +134,12 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
     new CapabilityBroker(new PolicyEngine(policyDoc, profile), audit, cwd);
+
+  // A trusted broker narrowed to one agent's declared capabilities (M18). It can
+  // only deny actions the agent didn't declare — never widen authority — so the
+  // executor running under it stays within the agent's spec. See AgentBroker.
+  const agentBrokerAt = (cwd: string, agent: AgentSpec): AgentBroker =>
+    new AgentBroker(new PolicyEngine(policyDoc, 'trusted'), audit, cwd, agent.capabilities);
 
   // Lazily-opened, runtime-owned resources (memoized so all consumers share one).
   let memoryStore: MemoryStore | undefined;
@@ -203,7 +215,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return sections.filter((s) => s.length > 0).join('\n');
   };
 
-  const loop = (): CognitionLoop =>
+  const loop = (agent?: AgentSpec): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
       // `trusted` so the worktree transaction's git ops are permitted; the broker
@@ -211,7 +223,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       transaction: new Transaction(brokerAt(root, 'trusted'), root, join(root, '.archon/worktrees')),
       reflector: new Reflector(memory()),
       journal: journal(),
-      executorFor: (worktree, taskId) => new Executor(brokerAt(worktree, 'trusted'), taskId),
+      // The executor's authority is the agent's (capability-scoped) when one is
+      // bound, else full trusted. Transaction/verifier stay trusted: an agent
+      // scopes the *writes it proposes*, not the loop's git/verification plumbing.
+      executorFor: (worktree, taskId) =>
+        new Executor(agent ? agentBrokerAt(worktree, agent) : brokerAt(worktree, 'trusted'), taskId),
       verifierFor: (worktree) => new Verifier(brokerAt(worktree, 'trusted')),
       // Verifier plugins run under the host's (config-profile) broker, so one
       // needing a capability the profile won't grant stays inert rather than

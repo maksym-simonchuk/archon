@@ -23,7 +23,7 @@ The spec asks for a *repository operating system*. What exists today is the
 | Architectural intelligence (boundaries, ownership, criticality) | ⬜ | Symbol graph exists; no domain/boundary model |
 | Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ⬜ | 3-tier memory store exists; nothing generates project intelligence |
 | Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
-| Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy | Spec→prompt/loop binding deferred (M18 note) |
+| Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy, **+ runtime binding** (`selectAgent`/`agentBriefing` → prompt; `AgentBroker` → capability-scoped authority; `/agent --run`) | — |
 | Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | 🟡 skills = passive Markdown; pre/post hook engine now exists | Multi-phase executable skill runtime deferred (M19 note) |
 | Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate + post-write check specs | Wiring the gate into the loop's write path deferred |
 | Preservation layer (intentional vs accidental complexity) | ✅ classifier + gate (preserve/caution/allow) | Advisory; not yet a hard write-block (M14 note) |
@@ -42,7 +42,7 @@ The spec asks for a *repository operating system*. What exists today is the
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
 `violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ⬜ ·
-`boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
+`boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
 `explain` 🟡(symbol≠architecture reasoning).
 
 ---
@@ -125,7 +125,7 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Build: generation pipeline that emits agents (e.g. routing/query/boundary-enforcer/dependency-cleanup/perf agents) from M8 stack + M13 constraints; each agent carries rules, memory-access scope, risk constraints, allowed actions, hooks, workflows. New CLI `agents`.
 - Deps: M8, M13. Exit: `agents` lists generated agents matching the repo's stack; each respects its risk/memory scope.
 - Shipped: pure `generateAgents` (`src/cognition/agent-factory.ts`) → framework agents (`nextjs-routing-agent`, `state-management-agent`, `api-contract-agent`), structural agents (`architecture-review-agent` always; `feature-boundary-enforcer` for sliced/DDD; `dependency-cleanup-agent` when cycles/god-modules exist), stack agents (`testing-agent`). Each `AgentSpec` carries triggers, rules, module scope, broker capabilities, and a risk-escalation ceiling; ids are de-duplicated and order-stable. `/agents` (`cmdAgents`). No new deps.
-- Deferred: binding an `AgentSpec` to a live prompt + broker session in the cognition loop (the declaration is produced; the runtime that drives it plugs into the loop later).
+- Runtime binding shipped: `src/cognition/agent-runtime.ts` — `selectAgent(agents, goal)` (pure fit-score over id/trigger/scope/rule overlap; falls back to the read-only `architecture-review-agent`) + `agentBriefing(spec)` (renders the mandate as a planner preamble → **spec→prompt**). `effecting/agent-broker.ts` `AgentBroker` extends the CapabilityBroker and overrides the single `request` gate to **deny any action outside the spec's capabilities before policy** (tighten-never-widen, ADR-0003) → **spec→authority**. `runtime.loop(agent?)` runs the executor under that scoped broker (transaction/verifier stay trusted). `/agent [--run] <goal>` (`cmdAgentRun`): selects the agent, plans under its briefing, and with `--run` executes through the capability-scoped loop — a read-only agent plans but its writes are denied, so the worktree discards.
 
 #### M19 — Autoskills v2 + Hooks Engine 🟡 (hooks engine shipped)
 - Goal: skills become executable, multi-phase, gated workflows.
