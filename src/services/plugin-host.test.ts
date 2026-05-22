@@ -7,7 +7,7 @@ import type { CapabilityAction } from '../core/types';
 import { AuditLog } from '../effecting/audit-log';
 import { CapabilityBroker } from '../effecting/capability-broker';
 import { loadPolicy, PolicyEngine } from '../effecting/policy-engine';
-import type { Plugin, ToolPlugin, VerifierPlugin } from '../plugins/abi';
+import type { Plugin, ProviderPlugin, ToolPlugin, VerifierPlugin } from '../plugins/abi';
 import { PluginHost } from './plugin-host';
 
 const doc = loadPolicy(readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8'));
@@ -24,6 +24,20 @@ const verifier = (name: string, capabilities: CapabilityAction[], verify: Verifi
   kind: 'verifier',
   manifest: { name, version: '0.0.0', kind: 'verifier', capabilities },
   verify,
+});
+
+const provider = (name: string, capabilities: CapabilityAction[], complete: ProviderPlugin['complete']): Plugin => ({
+  kind: 'provider',
+  manifest: { name, version: '0.0.0', kind: 'provider', capabilities },
+  complete,
+});
+const echoComplete: ProviderPlugin['complete'] = async (req) => ({
+  modelId: 'plugin',
+  text: req.prompt,
+  inputTokens: 0,
+  outputTokens: 0,
+  costUsd: 0,
+  cached: false,
 });
 
 describe('PluginHost (M7)', () => {
@@ -102,5 +116,16 @@ describe('PluginHost.runVerifiers (M7)', () => {
     // safe profile only *asks* on net, so this verifier is refused → excluded.
     host.register(verifier('net-verifier', ['net'], async () => ({ passed: false, checks: [] })));
     expect(await host.runVerifiers([])).toEqual([]);
+  });
+});
+
+describe('PluginHost.providerPlugins (ADR-0012)', () => {
+  it('returns only provider plugins the policy grants, excluding other kinds', async () => {
+    const host = new PluginHost(broker());
+    host.register(provider('local', ['fs.read'], echoComplete)); // granted under safe
+    host.register(provider('remote', ['net'], echoComplete)); // safe only asks on net → refused
+    host.register(verifier('v', ['fs.read'], async () => ({ passed: true, checks: [] }))); // wrong kind
+    const provs = await host.providerPlugins();
+    expect(provs.map((p) => p.manifest.name)).toEqual(['local']);
   });
 });

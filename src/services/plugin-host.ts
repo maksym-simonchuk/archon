@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { err, ok, type Result } from '../core/result';
 import type { CapabilityAction, PolicyVerdict, Verdict } from '../core/types';
 import type { CapabilityBroker } from '../effecting/capability-broker';
-import type { Plugin, PluginKind, PluginManifest } from '../plugins/abi';
+import type { Plugin, PluginKind, PluginManifest, ProviderPlugin } from '../plugins/abi';
 
 const KINDS = new Set<PluginKind>(['tool', 'verifier', 'provider', 'skill', 'retriever']);
 const ACTIONS = new Set<CapabilityAction>(['fs.read', 'fs.write', 'fs.delete', 'exec', 'net', 'secret.read']);
@@ -148,5 +148,23 @@ export class PluginHost {
       }
     }
     return verdicts;
+  }
+
+  /**
+   * Provider-kind plugins the active policy will let run — those whose every
+   * declared capability is granted (a refused one is excluded, so enabling a
+   * network completer is an explicit `trusted`/grant decision). The router calls
+   * these as a self-priced fallback when no configured model serves a request;
+   * the network call itself is inference substrate, not re-gated per call. See
+   * ADR-0012.
+   */
+  async providerPlugins(): Promise<ProviderPlugin[]> {
+    const granted: ProviderPlugin[] = [];
+    for (const plugin of this.plugins.values()) {
+      if (plugin.kind !== 'provider') continue;
+      if (await this.firstRefusal(plugin.manifest.name, plugin.manifest.capabilities)) continue;
+      granted.push(plugin);
+    }
+    return granted;
   }
 }
