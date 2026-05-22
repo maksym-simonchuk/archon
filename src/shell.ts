@@ -6,6 +6,7 @@ import {
   cmdAsk,
   cmdCost,
   cmdDoctor,
+  cmdExplain,
   cmdImpact,
   cmdIndex,
   cmdMemory,
@@ -46,6 +47,7 @@ const COMMANDS = [
   '/clear',
   '/index',
   '/impact',
+  '/explain',
   '/status',
   '/cost',
   '/model',
@@ -68,6 +70,7 @@ const SHELL_HELP = `commands:
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
   /impact <file>   blast radius — what a change to <file> affects
+  /explain <symbol>  definition + direct callers/callees (one hop)
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
@@ -175,6 +178,10 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/impact':
       if (arg) await cmdImpact(rt, arg);
       else console.log('usage: /impact <file|symbol>');
+      return true;
+    case '/explain':
+      if (arg) await cmdExplain(rt, arg);
+      else console.log('usage: /explain <symbol>');
       return true;
     case '/status':
       await cmdStatus(rt, { taskId: arg || undefined });

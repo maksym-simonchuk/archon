@@ -10,7 +10,7 @@ import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
 import { IndexStore } from './sensing/store';
-import { SymbolGraph } from './sensing/symbol-graph';
+import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
 
 export const makeTask = (goal: string, profile: Profile): Task => ({
@@ -321,6 +321,59 @@ export async function cmdImpact(rt: Runtime, target: string): Promise<void> {
       `impact of ${target}: ${seeds.length} symbol(s) → ${downstream} dependent(s) across ${radius.files.length} file(s):`,
     );
     for (const f of radius.files) console.log(`  - ${f}${f === target ? '  (source)' : ''}`);
+  } finally {
+    store.close();
+  }
+}
+
+/** The symbol segment of a qualified id (`src/x.ts#foo` → `foo`); the whole string if unqualified. */
+const bareName = (qualified: string): string => qualified.slice(qualified.indexOf('#') + 1);
+
+/** Print one direction of a symbol's one-hop neighborhood (or "(none)" when empty). */
+function printNeighbors(label: string, edges: SymbolNeighbors['dependsOn']): void {
+  if (edges.length === 0) {
+    console.log(`  ${label}: (none)`);
+    return;
+  }
+  console.log(`  ${label} (${edges.length}):`);
+  for (const e of edges) console.log(`    - ${e.name}  [${e.kind}]`);
+}
+
+/**
+ * Explain one symbol from the index: where it's defined, what it directly depends
+ * on (its callees/imports), and what directly depends on it (its callers/tests) —
+ * the one-hop neighborhood, complementing `impact`'s transitive reverse-reachability.
+ * Accepts a fully-qualified id (`src/x.ts#foo`) or a bare name (`foo`); a bare name
+ * defined in several files is reported as ambiguous so the operator can qualify it.
+ * Read-only and WASM-free: opens the existing index directly and never creates it.
+ */
+export async function cmdExplain(rt: Runtime, query: string): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('explain: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const all = store.allSymbols();
+    // Resolve to a single qualified id: exact match first, else by bare name
+    // (the segment after '#'), which may collide across files.
+    const exact = all.find((s) => s.name === query);
+    const matches = exact ? [exact] : all.filter((s) => bareName(s.name) === query);
+    if (matches.length === 0) {
+      console.log(`explain: "${query}" is not an indexed symbol (try \`archon impact <file>\`, or re-run \`archon index\`)`);
+      return;
+    }
+    if (matches.length > 1) {
+      console.log(`explain: "${query}" is ambiguous — ${matches.length} definitions; qualify one:`);
+      for (const m of matches) console.log(`  - ${m.name}  [${m.kind}]`);
+      return;
+    }
+    const sym = matches[0];
+    const { dependsOn, dependedOnBy } = new SymbolGraph(store).neighbors(sym.name);
+    console.log(`${sym.name}  [${sym.kind}]  defined in ${sym.file}`);
+    printNeighbors('depends on', dependsOn); // its callees / imports
+    printNeighbors('used by', dependedOnBy); // its callers / tests
   } finally {
     store.close();
   }
