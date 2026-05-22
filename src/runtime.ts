@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { AgentSpec } from './cognition/agent-factory';
 import { CognitionLoop } from './cognition/loop';
 import { Executor } from './cognition/executor';
 import { Planner } from './cognition/planner';
@@ -11,15 +12,18 @@ import type { PlanStrategy } from './cognition/types';
 import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
 import type { MemoryTier, Profile, Task } from './core/types';
+import { AgentBroker } from './effecting/agent-broker';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
+import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
 import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
 import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
+import { extractImports, resolveImport } from './sensing/import-resolver';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph } from './sensing/symbol-graph';
@@ -30,11 +34,20 @@ import { PluginHost } from './services/plugin-host';
 import { ProviderRouter, type ProviderClient } from './services/provider-router';
 import { TaskJournal } from './services/task-journal';
 
-/** Maps a provider id to the env var holding its API key — single source of truth. */
+/** Maps a key-bearing provider id to the env var holding its API key — single source of truth. */
 const PROVIDER_ENV: Record<string, string> = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
+  google: 'GOOGLE_GENERATIVE_AI_API_KEY',
 };
+
+/** Providers that need no API key (a local OpenAI-compatible server reached by base URL). */
+const KEYLESS_PROVIDERS = new Set(['local']);
+/** Default endpoint for the `local` provider (ollama); overridable via env. */
+const LOCAL_BASE_URL = process.env.ARCHON_LOCAL_BASE_URL ?? 'http://localhost:11434/v1';
+
+/** True if Archon ships a client builder for this provider id (with or without a key). */
+const isSupportedProvider = (id: string): boolean => PROVIDER_ENV[id] !== undefined || KEYLESS_PROVIDERS.has(id);
 
 /** The provider's API key from the environment, or undefined if unset/unknown. */
 function envKey(id: string): string | undefined {
@@ -42,13 +55,17 @@ function envKey(id: string): string | undefined {
   return name ? process.env[name] : undefined;
 }
 
-/** Build the concrete provider clients for which an API key is present in env. */
+/** Build the concrete provider clients available in this environment (keyed providers need their key). */
 function buildClients(providers: { id: string }[]): ProviderClient[] {
   const clients: ProviderClient[] = [];
   for (const p of providers) {
-    const key = envKey(p.id);
-    if (!key) continue;
-    if (p.id === 'anthropic' || p.id === 'openai') clients.push(createAiClient(p.id, key));
+    if (p.id === 'anthropic' || p.id === 'openai' || p.id === 'google') {
+      const key = envKey(p.id);
+      if (key) clients.push(createAiClient(p.id, key));
+    } else if (p.id === 'local') {
+      // No key needed; point the OpenAI-compatible client at the local server.
+      clients.push(createAiClient('local', process.env.ARCHON_LOCAL_API_KEY ?? 'local', { baseURL: LOCAL_BASE_URL }));
+    }
   }
   return clients;
 }
@@ -78,8 +95,12 @@ export interface Runtime {
   memory(): MemoryStore;
   /** The shared (lazily-opened) task journal. */
   journal(): TaskJournal;
-  /** Full plan → act → verify → reflect loop, sharing this runtime's memory + journal. */
-  loop(): CognitionLoop;
+  /**
+   * Full plan → act → verify → reflect loop, sharing this runtime's memory +
+   * journal. With an `agent`, the executor's writes are scoped to that agent's
+   * declared capabilities (M18) — it can never write more than its spec allows.
+   */
+  loop(agent?: AgentSpec): CognitionLoop;
   /** A built-in embedding retriever over one memory anchor, registered with the host. */
   retriever(tier: MemoryTier, key: string): Promise<RetrieverPlugin>;
   /** An incremental indexer plus its index store (caller closes the returned store). */
@@ -122,12 +143,19 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const strategy: PlanStrategy = llmPlanning ? new ProviderPlanner(router) : new ScaffoldStrategy();
   const providerStatus = config.providers.map((p) => ({
     id: p.id,
-    supported: PROVIDER_ENV[p.id] !== undefined,
-    keyPresent: Boolean(envKey(p.id)),
+    supported: isSupportedProvider(p.id),
+    // Keyless providers (local) are "ready" without a key; keyed ones need theirs in env.
+    keyPresent: KEYLESS_PROVIDERS.has(p.id) ? true : Boolean(envKey(p.id)),
   }));
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
     new CapabilityBroker(new PolicyEngine(policyDoc, profile), audit, cwd);
+
+  // A trusted broker narrowed to one agent's declared capabilities (M18). It can
+  // only deny actions the agent didn't declare — never widen authority — so the
+  // executor running under it stays within the agent's spec. See AgentBroker.
+  const agentBrokerAt = (cwd: string, agent: AgentSpec): AgentBroker =>
+    new AgentBroker(new PolicyEngine(policyDoc, 'trusted'), audit, cwd, agent.capabilities);
 
   // Lazily-opened, runtime-owned resources (memoized so all consumers share one).
   let memoryStore: MemoryStore | undefined;
@@ -203,7 +231,38 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return sections.filter((s) => s.length > 0).join('\n');
   };
 
-  const loop = (): CognitionLoop =>
+  // Pre-apply gate (M19): structural pre-write check the loop runs before opening
+  // a worktree. Resolves the import edges the planned writes would add and runs
+  // them, with the indexed edge set, through evaluatePreHooks — so a never-modify
+  // write or a cycle-closing import is refused before anything is written. No
+  // index yet ⇒ no structural signal ⇒ allow (the broker still gates each write).
+  const preApply = async (writes: { target: string; content: string }[]): Promise<PreHookFinding[]> => {
+    if (writes.length === 0) return [];
+    // The never-modify check needs only the write targets; the cycle/leak checks
+    // need the indexed edge set + the imports each write would add. With no index,
+    // edges are empty (never-modify still fires) — the broker gates each write too.
+    const indexPath = join(root, config.paths.index);
+    let existingEdges: { src: string; dst: string }[] = [];
+    let addedImports: { src: string; dst: string }[] = [];
+    if (existsSync(indexPath)) {
+      const store = new IndexStore(indexPath);
+      try {
+        existingEdges = store.loadFileEdges();
+      } finally {
+        store.close();
+      }
+      const onDisk = (rel: string): boolean => existsSync(join(root, ...rel.split('/')));
+      addedImports = writes.flatMap(({ target, content }) =>
+        extractImports(content)
+          .map((spec) => resolveImport(target, spec, onDisk))
+          .filter((dst): dst is string => dst !== undefined && dst !== target)
+          .map((dst) => ({ src: target, dst })),
+      );
+    }
+    return evaluatePreHooks({ writes: writes.map((w) => w.target), addedImports, existingEdges });
+  };
+
+  const loop = (agent?: AgentSpec): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
       // `trusted` so the worktree transaction's git ops are permitted; the broker
@@ -211,12 +270,17 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       transaction: new Transaction(brokerAt(root, 'trusted'), root, join(root, '.archon/worktrees')),
       reflector: new Reflector(memory()),
       journal: journal(),
-      executorFor: (worktree, taskId) => new Executor(brokerAt(worktree, 'trusted'), taskId),
+      // The executor's authority is the agent's (capability-scoped) when one is
+      // bound, else full trusted. Transaction/verifier stay trusted: an agent
+      // scopes the *writes it proposes*, not the loop's git/verification plumbing.
+      executorFor: (worktree, taskId) =>
+        new Executor(agent ? agentBrokerAt(worktree, agent) : brokerAt(worktree, 'trusted'), taskId),
       verifierFor: (worktree) => new Verifier(brokerAt(worktree, 'trusted')),
       // Verifier plugins run under the host's (config-profile) broker, so one
       // needing a capability the profile won't grant stays inert rather than
       // gaining the loop's trusted authority — plugins tighten, never widen.
       verifierPlugins: async (files) => (await pluginHost()).runVerifiers(files),
+      preApply,
       cost: () => router.spent,
     });
 

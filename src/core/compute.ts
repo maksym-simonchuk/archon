@@ -24,6 +24,21 @@ export interface ComputeCore {
    * similar rows, highest similarity first.
    */
   cosineTopK(query: Float32Array, matrix: Float32Array, dim: number, k: number): Promise<number[]>;
+  /**
+   * Embed `query` + `docs` with the deterministic hashing-trick embedding and
+   * return the row indices of the `k` documents most cosine-similar to the query
+   * (highest first). The tokenizing, FNV-1a hashing, and `rows × dim` matrix
+   * build all run inside the core — one coarse crossing instead of building the
+   * matrix on the host (ADR-0011).
+   */
+  embedTopK(query: string, docs: string[], dim: number, k: number): Promise<number[]>;
+  /**
+   * Rank `candidates` against `query` by fuzzy subsequence match (fzf-style),
+   * best first; non-matches are dropped, an empty query keeps input order.
+   * Returns indices into `candidates`. One coarse crossing — the scan/score runs
+   * in the core (ADR-0011). Powers reverse-history search and fuzzy pickers.
+   */
+  fuzzyRank(query: string, candidates: string[]): Promise<number[]>;
 }
 
 /**
@@ -49,5 +64,9 @@ export async function loadComputeCore(): Promise<ComputeCore> {
     rankRepoMap: async (graph) => JSON.parse(wasm.rank_repo_map(JSON.stringify(graph))) as RankedSymbol[],
     cosineTopK: async (query, matrix, dim, k) =>
       Array.from(wasm.cosine_topk(query, matrix, dim, k)),
+    embedTopK: async (query, docs, dim, k) =>
+      Array.from(wasm.embed_topk(query, JSON.stringify(docs), dim, k)),
+    fuzzyRank: async (query, candidates) =>
+      Array.from(wasm.fuzzy_rank(query, JSON.stringify(candidates))),
   };
 }

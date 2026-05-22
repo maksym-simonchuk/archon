@@ -247,6 +247,13 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// no results. Pure compute — the host owns the vectors and the I/O.
 #[wasm_bindgen]
 pub fn cosine_topk(query: &[f32], matrix: &[f32], dim: usize, k: usize) -> Vec<u32> {
+    cosine_topk_impl(query, matrix, dim, k)
+}
+
+/// Shared cosine top-k over a row-major `rows × dim` matrix. Factored out so both
+/// the typed-array `cosine_topk` export and the text-embedding `embed_topk` path
+/// rank with identical semantics (zero-norm rows score 0, ties keep input order).
+fn cosine_topk_impl(query: &[f32], matrix: &[f32], dim: usize, k: usize) -> Vec<u32> {
     if dim == 0 || k == 0 || query.len() < dim {
         return Vec::new();
     }
@@ -267,6 +274,123 @@ pub fn cosine_topk(query: &[f32], matrix: &[f32], dim: usize, k: usize) -> Vec<u
     // Descending by score; stable on ties so equal scores keep input order.
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     scored.into_iter().take(k.min(rows)).map(|(i, _)| i as u32).collect()
+}
+
+// ── embed_topk (M7) ─────────────────────────────────────────────────────────
+
+/// FNV-1a 32-bit over a token's bytes. After lowercasing + alphanumeric
+/// tokenization every token is ASCII, so byte iteration matches the host's
+/// `charCodeAt` semantics exactly — keeping the embedding bit-for-bit stable.
+fn fnv1a(token: &str) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in token.bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
+}
+
+/// Deterministic bag-of-tokens embedding via the hashing trick: lowercase, split
+/// on non-`[a-z0-9]` runs, and bump one of `dim` buckets per token (FNV-1a →
+/// bucket). No model, no network — identical text always yields an identical
+/// vector, so retrieval stays reproducible and offline.
+fn embed(text: &str, dim: usize) -> Vec<f32> {
+    let mut vec = vec![0f32; dim];
+    for token in text
+        .to_lowercase()
+        .split(|c: char| !(c.is_ascii_digit() || c.is_ascii_lowercase()))
+    {
+        if !token.is_empty() {
+            vec[(fnv1a(token) as usize) % dim] += 1.0;
+        }
+    }
+    vec
+}
+
+/// Embed a query and a batch of documents with the hashing trick, then return the
+/// row indices of the `k` documents most cosine-similar to the query (highest
+/// first). One coarse crossing: the host passes raw text in, gets ranked indices
+/// out — the per-token hashing and `rows × dim` matrix build that used to run in
+/// JS now stay in the core (ADR-0011 boundary discipline). `docs_json` is a JSON
+/// `string[]`; an empty batch, `dim == 0`, or `k == 0` yields no results.
+#[wasm_bindgen]
+pub fn embed_topk(query: &str, docs_json: &str, dim: usize, k: usize) -> Vec<u32> {
+    let docs: Vec<String> = serde_json::from_str(docs_json).unwrap_or_default();
+    if dim == 0 || k == 0 || docs.is_empty() {
+        return Vec::new();
+    }
+    let q = embed(query, dim);
+    let mut matrix = vec![0f32; docs.len() * dim];
+    for (i, doc) in docs.iter().enumerate() {
+        matrix[i * dim..(i + 1) * dim].copy_from_slice(&embed(doc, dim));
+    }
+    cosine_topk_impl(&q, &matrix, dim, k)
+}
+
+// ── fuzzy_rank ──────────────────────────────────────────────────────────────
+
+/// Score one candidate against a (lowercased, whitespace-stripped) query as an
+/// ordered subsequence, fzf-style. `None` if the query is not a subsequence.
+/// Bonuses reward consecutive runs, matches at word boundaries (after a
+/// separator) and camelCase humps, and a match at the very start — so
+/// `bnd → boundaries` and `imp → improve` rank where a human expects. ASCII
+/// lowercase keeps char indices 1:1 with the candidate (paths/commands/history).
+fn fuzzy_score(query: &[char], candidate: &str) -> Option<i32> {
+    let orig: Vec<char> = candidate.chars().collect();
+    let mut qi = 0usize;
+    let mut score = 0i32;
+    let mut prev: Option<usize> = None;
+    for (hi, oc) in orig.iter().enumerate() {
+        if qi >= query.len() {
+            break;
+        }
+        if oc.to_ascii_lowercase() == query[qi] {
+            let mut bonus = 1;
+            if prev == Some(hi.wrapping_sub(1)) {
+                bonus += 5; // consecutive with the previous match
+            }
+            let after_sep = hi == 0
+                || matches!(orig.get(hi - 1), Some('/') | Some('_') | Some('-') | Some('.') | Some(' '));
+            let camel = hi > 0 && oc.is_ascii_uppercase() && !orig[hi - 1].is_ascii_uppercase();
+            if after_sep || camel {
+                bonus += 8;
+            }
+            if hi == 0 {
+                bonus += 5;
+            }
+            score += bonus;
+            prev = Some(hi);
+            qi += 1;
+        }
+    }
+    if qi == query.len() {
+        Some(score)
+    } else {
+        None
+    }
+}
+
+/// Rank `candidates` against `query` (fuzzy subsequence). Returns the indices of
+/// the matching candidates, best first; ties prefer the shorter candidate then
+/// input order. An empty query keeps every candidate in input order (so a fresh
+/// reverse-search shows full, unreordered history). One coarse crossing: the host
+/// passes all candidates as a JSON `string[]`, the core returns ranked indices —
+/// the CPU-bound scan/score stays in WASM (ADR-0011).
+#[wasm_bindgen]
+pub fn fuzzy_rank(query: &str, candidates_json: &str) -> Vec<u32> {
+    let cands: Vec<String> = serde_json::from_str(candidates_json).unwrap_or_default();
+    let q: Vec<char> = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    if q.is_empty() {
+        return (0..cands.len() as u32).collect();
+    }
+    let mut scored: Vec<(u32, i32, usize)> = Vec::new();
+    for (i, cand) in cands.iter().enumerate() {
+        if let Some(s) = fuzzy_score(&q, cand) {
+            scored.push((i as u32, s, cand.chars().count()));
+        }
+    }
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
+    scored.into_iter().map(|(i, _, _)| i).collect()
 }
 
 #[cfg(test)]
@@ -324,5 +448,56 @@ mod tests {
         let query = [0.0_f32, 0.0];
         assert!(cosine_topk(&query, &[1.0, 0.0], 2, 1).is_empty()); // zero-norm query
         assert!(cosine_topk(&[1.0, 0.0], &[1.0, 0.0], 2, 0).is_empty()); // k == 0
+    }
+
+    #[test]
+    fn fnv1a_is_deterministic_and_case_folds_via_embed() {
+        // Same token hashes to the same bucket; embed lowercases first.
+        assert_eq!(fnv1a("sqlite"), fnv1a("sqlite"));
+        let dim = 64;
+        assert_eq!(embed("SQLite", dim), embed("sqlite", dim));
+        // Punctuation/whitespace split into the same two tokens.
+        assert_eq!(embed("a-b", dim), embed("a b", dim));
+    }
+
+    #[test]
+    fn embed_topk_ranks_the_nearest_document_first() {
+        let docs = r#"["database sqlite storage persistence","network http request latency","rust wasm compute kernel"]"#;
+        let top = embed_topk("sqlite database persistence layer", docs, 64, 2);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0], 0); // the sqlite/database doc wins
+    }
+
+    #[test]
+    fn embed_topk_handles_empty_batch_and_zero_k() {
+        assert!(embed_topk("q", "[]", 64, 3).is_empty());
+        assert!(embed_topk("q", r#"["doc"]"#, 64, 0).is_empty());
+        assert!(embed_topk("q", "not json", 64, 3).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_rank_matches_subsequences_and_drops_non_matches() {
+        let cands = r#"["/boundaries","/improve","/impact","/status"]"#;
+        // "imp" hits /improve and /impact (both contain i-m-p in order), not the others.
+        let hits = fuzzy_rank("imp", cands);
+        assert_eq!(hits, vec![2, 1]); // shorter "/impact" outranks "/improve" on the length tiebreak
+        // "bnd" is a subsequence of "/boundaries" only.
+        assert_eq!(fuzzy_rank("bnd", cands), vec![0]);
+        // no subsequence match → empty.
+        assert!(fuzzy_rank("zzz", cands).is_empty());
+    }
+
+    #[test]
+    fn fuzzy_rank_prefers_word_boundary_and_consecutive_matches() {
+        // "rs" should rank a word-boundary hit (run-step) above a scattered one.
+        let cands = r#"["characters","run_step"]"#;
+        let hits = fuzzy_rank("rs", cands);
+        assert_eq!(hits[0], 1); // run_step: r at start, s after '_' — both boundary bonuses
+    }
+
+    #[test]
+    fn fuzzy_rank_empty_query_keeps_input_order() {
+        assert_eq!(fuzzy_rank("", r#"["a","b","c"]"#), vec![0, 1, 2]);
+        assert!(fuzzy_rank("a", "not json").is_empty());
     }
 }

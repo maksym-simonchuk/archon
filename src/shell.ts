@@ -3,6 +3,8 @@ import { join } from 'node:path';
 import { createInterface, moveCursor } from 'node:readline';
 import {
   type AskTurn,
+  cmdAgentRun,
+  cmdAgents,
   cmdAsk,
   cmdBoundaries,
   cmdCost,
@@ -10,7 +12,9 @@ import {
   cmdDoctor,
   cmdEvolution,
   cmdExplain,
+  cmdHooks,
   cmdImpact,
+  cmdImprove,
   cmdIndex,
   cmdMap,
   cmdMemory,
@@ -18,20 +22,26 @@ import {
   cmdMemoryList,
   cmdModel,
   cmdPath,
+  cmdPhilosophy,
   cmdPlan,
   cmdPlugins,
   cmdPolicy,
+  cmdPreserve,
   cmdPromote,
   cmdPromotions,
+  cmdRefactor,
   cmdRisk,
   cmdRun,
   cmdSh,
+  cmdSimulate,
   cmdSkills,
   cmdStatus,
   cmdTool,
   cmdViolations,
+  cmdWatch,
   extractFlag,
 } from './commands';
+import type { ChangeKind } from './cognition/preservation';
 import { buildRuntime, type Runtime } from './runtime';
 
 const HISTORY_FILE = 'shell_history';
@@ -46,16 +56,19 @@ export interface ShellSession {
   askHistory: AskTurn[];
   /** Controller for an in-flight /ask, if any — Ctrl-C aborts it (see `startShell`). */
   abort?: AbortController;
+  /** Dirty-set snapshot threaded across `/watch` ticks (M22) so each tick reports a delta. */
+  watchDirty: ReadonlySet<string>;
 }
-export const newSession = (): ShellSession => ({ askHistory: [] });
+export const newSession = (): ShellSession => ({ askHistory: [], watchDirty: new Set() });
 
-/** Every slash command the shell understands — drives tab-completion. */
-const COMMANDS = [
+/** Every slash command the shell understands — drives tab-completion (and the TUI slash menu). */
+export const COMMANDS = [
   '/plan',
   '/run',
   '/ask',
   '/clear',
   '/index',
+  '/watch',
   '/impact',
   '/explain',
   '/map',
@@ -64,6 +77,14 @@ const COMMANDS = [
   '/risk',
   '/evolution',
   '/decisions',
+  '/philosophy',
+  '/preserve',
+  '/agents',
+  '/agent',
+  '/improve',
+  '/refactor',
+  '/hooks',
+  '/simulate',
   '/path',
   '/status',
   '/cost',
@@ -87,6 +108,7 @@ const SHELL_HELP = `commands:
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
+  /watch [--loop|--stop]  reindex changed files + refresh health · --loop polls in the background
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
@@ -95,6 +117,14 @@ const SHELL_HELP = `commands:
   /risk <file>     change-risk level for a file (blast × criticality × confidence)
   /evolution       churn × coupling over git history — modules trending toward god-object
   /decisions [query|propose]  ADR decision memory · propose: draft an ADR for the latest change
+  /philosophy      inferred engineering culture (typing, abstraction, bias, scale)
+  /preserve <file> [change]  would a change erase intentional/critical structure?
+  /agents          project-native agents the stack + topology imply
+  /agent [--run] <goal>  bind the best-fit agent to a goal — plan under it, or --run to execute scoped
+  /improve         conservative, ROI-ranked, preservation-gated improvement proposals
+  /refactor [--pick N] [--force]  apply a proposal, simulation-gated, under a scoped agent
+  /hooks           pre-write gate (forbidden-import/boundary/never-modify) + post-write checks
+  /simulate <file> [change]  predict blast radius + regression probability before applying
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
@@ -142,6 +172,12 @@ function statusLine(rt: Runtime): string {
 /** Memory tiers offered after `/memory list ` — mirrors MEMORY_TIERS in commands.ts. */
 const MEMORY_COMPLETION_TIERS = ['episodic', 'semantic', 'procedural'] as const;
 
+/** Change kinds accepted by `/preserve` — mirrors ChangeKind in cognition/preservation. */
+const CHANGE_KINDS = ['modify', 'simplify', 'remove-abstraction', 'rewrite', 'extract'] as const;
+/** Coerce a user token to a ChangeKind; `/preserve` defaults to the structure-stripping case, `/simulate` to a plain modify. */
+const asChangeKind = (s: string | undefined, fallback: ChangeKind = 'remove-abstraction'): ChangeKind =>
+  (CHANGE_KINDS as readonly string[]).includes(s ?? '') ? (s as ChangeKind) : fallback;
+
 /**
  * Static argument completions for the few commands with a fixed subcommand
  * vocabulary. Returns the full candidate *lines* (so readline can append the
@@ -155,8 +191,12 @@ function argCandidates(head: string, words: string[]): string[] {
     if (words.length === 3 && words[1] === 'list')
       return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
   }
+  if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
+  if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
+  if ((head === '/preserve' || head === '/simulate') && words.length === 3)
+    return CHANGE_KINDS.map((k) => `${head} ${words[1]} ${k}`);
   return [];
 }
 
@@ -267,6 +307,12 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/index':
       await cmdIndex(rt);
       return true;
+    case '/watch':
+      // Single incremental tick (reindex changed subtree + refresh health). The
+      // continuous `--loop` poller is a REPL affordance handled in startShell;
+      // here a bare /watch (or a stray flag) runs one tick and threads the dirty set.
+      session.watchDirty = await cmdWatch(rt, session.watchDirty);
+      return true;
     case '/impact':
       if (arg) await cmdImpact(rt, arg);
       else console.log('usage: /impact <file|symbol>');
@@ -294,6 +340,44 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/decisions':
       await cmdDecisions(rt, arg);
       return true;
+    case '/philosophy':
+      await cmdPhilosophy(rt);
+      return true;
+    case '/preserve': {
+      const [file, kind] = rest;
+      if (!file) console.log(`usage: /preserve <file> [${CHANGE_KINDS.join('|')}]`);
+      else await cmdPreserve(rt, file, asChangeKind(kind));
+      return true;
+    }
+    case '/agents':
+      await cmdAgents(rt);
+      return true;
+    case '/agent': {
+      const run = rest.includes('--run'); // boolean flag — accepted anywhere in the args
+      const g = rest.filter((t) => t !== '--run').join(' ').trim();
+      if (!g) console.log('usage: /agent [--run] <goal>');
+      else await cmdAgentRun(rt, g, { run });
+      return true;
+    }
+    case '/improve':
+      await cmdImprove(rt);
+      return true;
+    case '/refactor': {
+      const { value: pick, rest: r } = extractFlag(rest, '--pick');
+      const n = pick !== undefined ? Number(pick) : undefined;
+      if (n !== undefined && (!Number.isInteger(n) || n < 0)) console.log('usage: /refactor [--pick <n≥0>] [--force]');
+      else await cmdRefactor(rt, { pick: n, force: r.includes('--force') });
+      return true;
+    }
+    case '/hooks':
+      await cmdHooks(rt);
+      return true;
+    case '/simulate': {
+      const [file, kind] = rest;
+      if (!file) console.log(`usage: /simulate <file> [${CHANGE_KINDS.join('|')}]`);
+      else await cmdSimulate(rt, file, asChangeKind(kind, 'modify'));
+      return true;
+    }
     case '/path': {
       const [from, to] = rest;
       if (from && to) await cmdPath(rt, from, to);
@@ -399,6 +483,44 @@ export async function startShell(): Promise<void> {
   // suggestion over command output. The keypress handler fires AFTER readline's
   // own (we register later), so rl.line/rl.cursor are already updated.
   let busy = false;
+
+  // ── /watch background poller (M22 daemon, in-process) ──────────────────────
+  // A timer that incrementally reindexes the dirty subtree and refreshes health
+  // without re-running a command. Skips a tick while a command is mid-output
+  // (reuses `busy`), unref'd so it never keeps the process alive on its own, and
+  // redraws the prompt after each tick so background output doesn't strand it.
+  const WATCH_INTERVAL_MS = 2000;
+  let watchTimer: NodeJS.Timeout | undefined;
+  const startWatchLoop = (): void => {
+    if (watchTimer) {
+      console.log('watch: already running — /watch --stop to stop');
+      return;
+    }
+    console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s — /watch --stop to stop`);
+    watchTimer = setInterval(() => {
+      if (busy) return; // don't interleave a tick with a running command's output
+      busy = true;
+      void cmdWatch(rt, session.watchDirty)
+        .then((next) => {
+          session.watchDirty = next;
+        })
+        .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
+        .finally(() => {
+          busy = false;
+          rl.prompt(true); // redraw the prompt beneath any tick output
+        });
+    }, WATCH_INTERVAL_MS);
+    watchTimer.unref?.();
+  };
+  const stopWatchLoop = (): void => {
+    if (!watchTimer) {
+      console.log('watch: not running');
+      return;
+    }
+    clearInterval(watchTimer);
+    watchTimer = undefined;
+    console.log('watch: stopped');
+  };
   // Repaint the dimmed suggestion after the cursor, then move the cursor back to
   // its logical spot. readline clears to end-of-line on its next refresh, so the
   // ghost erases itself on the following keystroke — we only ever draw. Cosmetic:
@@ -445,6 +567,18 @@ export async function startShell(): Promise<void> {
   try {
     for await (const line of rl) {
       const input = line.trim();
+      // The continuous watcher is a REPL affordance (it owns a timer the pure
+      // dispatch table can't), so it's toggled here, before dispatch.
+      if (input === '/watch --loop') {
+        startWatchLoop();
+        frame();
+        continue;
+      }
+      if (input === '/watch --stop') {
+        stopWatchLoop();
+        frame();
+        continue;
+      }
       if (input) {
         busy = true; // suppress ghost-text painting while a command runs
         try {
@@ -458,6 +592,7 @@ export async function startShell(): Promise<void> {
       frame();
     }
   } finally {
+    if (watchTimer) stopWatchLoop();
     rl.close();
     rt.close();
     saveHistory(historyFile, history);

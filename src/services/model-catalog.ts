@@ -48,7 +48,42 @@ export const MODEL_CATALOG: Record<string, ModelSpec> = {
     costPer1kOutput: 0.0006,
     strengths: ['summarize', 'plan', 'embed'],
   },
+  // Gemini — large-context ingestion / multimodal repository understanding (the
+  // vision's "Gemini → large-scale ingestion"); 1M-token window, cheap.
+  'gemini-2.0-flash': {
+    id: 'gemini-2.0-flash',
+    provider: 'google',
+    contextWindow: 1_000_000,
+    costPer1kInput: 0.0001,
+    costPer1kOutput: 0.0004,
+    strengths: ['summarize', 'embed', 'reason'],
+  },
+  'gemini-1.5-pro': {
+    id: 'gemini-1.5-pro',
+    provider: 'google',
+    contextWindow: 2_000_000,
+    costPer1kInput: 0.00125,
+    costPer1kOutput: 0.005,
+    strengths: ['reason', 'plan', 'summarize'],
+  },
 };
+
+/**
+ * A synthesized spec for a `local` model id — runs on the user's machine via an
+ * OpenAI-compatible server (ollama / LM Studio), so it is free (cost 0) and its
+ * id is user-chosen (`llama3.1`, `qwen2.5-coder`, …) rather than catalogued. The
+ * vision's "local → cheap background analysis / indexing augmentation".
+ */
+function localSpec(id: string): ModelSpec {
+  return {
+    id,
+    provider: 'local',
+    contextWindow: 32_768,
+    costPer1kInput: 0,
+    costPer1kOutput: 0,
+    strengths: ['summarize', 'embed', 'reason', 'plan', 'diff'],
+  };
+}
 
 /**
  * Resolve a config provider list (`{ id, models }`) into `ModelSpec`s from the
@@ -60,6 +95,12 @@ export function resolveModels(providers: { id: string; models: string[] }[]): Mo
   const out: ModelSpec[] = [];
   for (const p of providers) {
     for (const modelId of p.models) {
+      // Local models are user-named and free, so they are synthesized rather than
+      // catalogued; every other provider resolves against the catalog by id.
+      if (p.id === 'local') {
+        out.push(localSpec(modelId));
+        continue;
+      }
       const spec = MODEL_CATALOG[modelId];
       if (spec && spec.provider === p.id) out.push(spec);
     }

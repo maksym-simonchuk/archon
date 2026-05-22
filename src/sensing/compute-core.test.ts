@@ -32,4 +32,30 @@ describe('Rust/WASM compute core', () => {
     expect(await core.cosineTopK(query, matrix, 2, 2)).toEqual([0, 1]);
     expect(await core.cosineTopK(query, matrix, 2, 1)).toEqual([0]);
   });
+
+  it('embedTopK tokenizes + hashes docs in-core and ranks the nearest first', async () => {
+    const core = await loadComputeCore();
+    const docs = [
+      'database sqlite storage persistence durable',
+      'network http request latency retries',
+      'rust wasm compute kernel pure',
+    ];
+    const top = await core.embedTopK('sqlite database persistence layer', docs, 64, 2);
+    expect(top).toHaveLength(2);
+    expect(top[0]).toBe(0); // the sqlite/database doc wins
+    expect(await core.embedTopK('q', [], 64, 3)).toEqual([]);
+    expect(await core.embedTopK('q', docs, 64, 0)).toEqual([]);
+  });
+
+  it('fuzzyRank ranks subsequence matches and drops non-matches', async () => {
+    const core = await loadComputeCore();
+    const cmds = ['/boundaries', '/improve', '/impact', '/status'];
+    // "imp" matches both /impact and /improve; shorter wins the tiebreak.
+    expect(await core.fuzzyRank('imp', cmds)).toEqual([2, 1]);
+    // "bnd" is a subsequence of "/boundaries" only.
+    expect(await core.fuzzyRank('bnd', cmds)).toEqual([0]);
+    // empty query keeps input order; no match yields [].
+    expect(await core.fuzzyRank('', cmds)).toEqual([0, 1, 2, 3]);
+    expect(await core.fuzzyRank('zzz', cmds)).toEqual([]);
+  });
 });

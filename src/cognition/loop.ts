@@ -1,4 +1,5 @@
 import type { JournalKind, StepResult, Task, Verdict } from '../core/types';
+import type { PreHookFinding } from '../effecting/hooks';
 import type { Transaction } from '../effecting/transaction';
 import type { TaskJournal } from '../services/task-journal';
 import type { Executor } from './executor';
@@ -24,6 +25,15 @@ export interface CognitionLoopDeps {
    * built-in checks only.
    */
   verifierPlugins?: (files: string[]) => Promise<Verdict[]>;
+  /**
+   * Static pre-apply gate (M19): given the plan's planned writes (target + the
+   * content it would write), return the hook findings. A `block` finding aborts
+   * the run BEFORE any worktree is opened — nothing is written. Pure structural
+   * check (never-modify zones, import cycles, boundary leaks); omitted ⇒ no gate
+   * (the broker still gates every individual write). It can only stop a run, never
+   * authorise one — tighten, never widen.
+   */
+  preApply?: (writes: { target: string; content: string }[]) => Promise<PreHookFinding[]>;
   /** Provider spend (USD) to record as the run's `cost` entry; omitted ⇒ no cost entry. */
   cost?: () => number;
 }
@@ -47,13 +57,35 @@ export class CognitionLoop {
   constructor(private readonly deps: CognitionLoopDeps) {}
 
   async run(task: Task, context = ''): Promise<StepResult[]> {
-    const { planner, transaction, reflector, journal, executorFor, verifierFor, verifierPlugins, cost } = this.deps;
+    const { planner, transaction, reflector, journal, executorFor, verifierFor, verifierPlugins, preApply, cost } = this.deps;
     const note = (kind: JournalKind, payload: unknown): void => {
       journal.append({ taskId: task.id, ts: new Date().toISOString(), kind, payload });
     };
 
     const cog = await planner.plan(task, context);
     note('plan', { rationale: cog.plan.rationale, steps: cog.plan.steps.map((s) => s.intent) });
+
+    // Pre-apply gate (M19): a `block` finding (write into a never-modify zone, or
+    // an import that would close a module cycle) stops the run before any worktree
+    // exists — the safest possible point, since nothing has been written. The gate
+    // can only refuse; it never grants authority the broker wouldn't.
+    if (preApply) {
+      const writes = Object.values(cog.actions)
+        .filter((a) => a.kind === 'write')
+        .map((a) => ({ target: a.target, content: a.content }));
+      const blocks = (await preApply(writes)).filter((f) => f.severity === 'block');
+      if (blocks.length > 0) {
+        const verdict: Verdict = {
+          passed: false,
+          checks: blocks.map((b) => ({ name: `prehook:${b.hook}`, passed: false, output: `${b.subject} — ${b.detail}` })),
+        };
+        note('verdict', { passed: false, checks: verdict.checks });
+        note('decision', { merged: false, outcome: 'blocked by pre-apply hooks (no worktree opened)' });
+        const results: StepResult[] = [{ stepId: `${task.id}-prehook`, verdict }];
+        await reflector.reflect(task, results);
+        return results;
+      }
+    }
 
     const begun = await transaction.begin(task.id);
     if (!begun.ok) throw new Error(`[archon] cannot begin transaction: ${begun.error.message}`);

@@ -17,6 +17,8 @@ const fakeCore = (): ComputeCore => ({
   }),
   rankRepoMap: async () => [],
   cosineTopK: async () => [],
+  embedTopK: async () => [],
+  fuzzyRank: async () => [],
 });
 
 let dir: string | undefined;
