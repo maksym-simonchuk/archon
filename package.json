@@ -12,6 +12,7 @@
     "build:wasm": "wasm-pack build crates/archon-core --target nodejs --out-dir pkg",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "smoke:live": "tsx scripts/smoke-live.ts",
     "dev": "tsx src/cli.ts",
     "start": "node dist/cli.js"
   },
