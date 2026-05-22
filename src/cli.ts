@@ -34,9 +34,9 @@ Usage:
   archon                  Launch the interactive shell
   archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
-  archon impact <file>    Blast radius — what a change here affects     (M1)
-  archon explain <symbol> Definition + direct callers/callees            (M1)
-  archon map              Graph overview — size + most depended-on        (M1)
+  archon impact [--json] <file>   Blast radius — what a change affects    (M1)
+  archon explain [--json] <symbol>  Definition + direct callers/callees   (M1)
+  archon map [--json]     Graph overview — size + most depended-on        (M1)
   archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
@@ -84,17 +84,17 @@ async function main(argv: string[]): Promise<void> {
     case 'index':
       return withRuntime(cmdIndex);
     case 'impact': {
-      const file = rest[0];
-      if (!file) return usageError('impact <file|symbol>');
-      return withRuntime((rt) => cmdImpact(rt, file));
+      const file = rest.find((a) => !a.startsWith('--')); // skip --json
+      if (!file) return usageError('impact [--json] <file|symbol>');
+      return withRuntime((rt) => cmdImpact(rt, file, { json }));
     }
     case 'explain': {
-      const symbol = rest[0];
-      if (!symbol) return usageError('explain <symbol>');
-      return withRuntime((rt) => cmdExplain(rt, symbol));
+      const symbol = rest.find((a) => !a.startsWith('--')); // skip --json
+      if (!symbol) return usageError('explain [--json] <symbol>');
+      return withRuntime((rt) => cmdExplain(rt, symbol, { json }));
     }
     case 'map':
-      return withRuntime(cmdMap);
+      return withRuntime((rt) => cmdMap(rt, { json }));
     case 'plan': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
       const g = r.filter((a) => a !== '--json').join(' ').trim();

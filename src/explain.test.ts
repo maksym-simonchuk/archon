@@ -120,6 +120,37 @@ describe('archon explain (one-hop neighborhood)', () => {
     rt.close();
   });
 
+  it('emits a machine-readable report under --json for a resolved symbol', async () => {
+    const rt = await runtime();
+    seedGraph(rt.root);
+    const log = captured();
+    await cmdExplain(rt, 'src/a.ts#a', { json: true });
+    const report = JSON.parse(text(log));
+
+    expect(report.resolved).toBe('src/a.ts#a');
+    expect(report.kind).toBe('function');
+    expect(report.file).toBe('src/a.ts');
+    expect(report.dependedOnBy).toContainEqual({ name: 'src/b.ts#b', kind: 'calls' });
+    expect(report.candidates).toEqual([]);
+    rt.close();
+  });
+
+  it('emits resolved:null with candidates for an ambiguous bare name under --json', async () => {
+    const rt = await runtime();
+    const store = new IndexStore(join(rt.root, '.archon/index.db'));
+    store.replaceFileGraph('src/x.ts', [{ name: 'src/x.ts#helper', kind: 'function' }], []);
+    store.replaceFileGraph('src/y.ts', [{ name: 'src/y.ts#helper', kind: 'function' }], []);
+    store.close();
+
+    const log = captured();
+    await cmdExplain(rt, 'helper', { json: true });
+    const report = JSON.parse(text(log));
+
+    expect(report.resolved).toBeNull();
+    expect(report.candidates).toEqual(expect.arrayContaining(['src/x.ts#helper', 'src/y.ts#helper']));
+    rt.close();
+  });
+
   it('asks for an index when none exists, creating no db (read-only)', async () => {
     const rt = await runtime();
     const log = captured();

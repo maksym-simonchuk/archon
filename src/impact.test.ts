@@ -86,6 +86,20 @@ describe('archon impact (blast radius)', () => {
     rt.close();
   });
 
+  it('emits a machine-readable report under --json', async () => {
+    const rt = await runtime();
+    seedGraph(rt.root);
+    const log = captured();
+    await cmdImpact(rt, 'src/a.ts', { json: true });
+    const report = JSON.parse(text(log)); // stdout is exactly one JSON document
+
+    expect(report.target).toBe('src/a.ts');
+    expect(report.seeds).toContain('src/a.ts#a');
+    expect(report.dependents).toContain('src/b.ts#b'); // b depends on a
+    expect(report.files).toEqual(expect.arrayContaining(['src/a.ts', 'src/b.ts']));
+    rt.close();
+  });
+
   it('asks for an index when none exists, creating no db (read-only)', async () => {
     const rt = await runtime();
     const log = captured();

@@ -291,10 +291,23 @@ export async function cmdIndex(rt: Runtime): Promise<void> {
  * opens the existing index directly (like `status` with the journal) and never
  * creates it — run `archon index` first.
  */
-export async function cmdImpact(rt: Runtime, target: string): Promise<void> {
+/** Machine-readable shape of `archon impact --json` (a stable automation contract). */
+export interface ImpactReport {
+  target: string;
+  /** Symbols seeded from the target (every symbol a file defines, or the one symbol). */
+  seeds: string[];
+  /** Downstream symbols that transitively depend on the seeds (excludes the seeds). */
+  dependents: string[];
+  /** Every file in the blast radius. */
+  files: string[];
+}
+
+export async function cmdImpact(rt: Runtime, target: string, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (): ImpactReport => ({ target, seeds: [], dependents: [], files: [] });
   const indexPath = join(rt.root, rt.config.paths.index);
   if (!existsSync(indexPath)) {
-    console.log('impact: no index yet — run `archon index` first');
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('impact: no index yet — run `archon index` first');
     return;
   }
   const store = new IndexStore(indexPath);
@@ -304,6 +317,10 @@ export async function cmdImpact(rt: Runtime, target: string): Promise<void> {
     const fileSeeds = all.filter((s) => s.file === target).map((s) => s.name);
     const seeds = fileSeeds.length > 0 ? fileSeeds : all.filter((s) => s.name === target).map((s) => s.name);
     if (seeds.length === 0) {
+      if (opts.json) {
+        console.log(JSON.stringify(empty(), null, 2));
+        return;
+      }
       // Distinguish "indexed but symbol-less" (e.g. a types-only file — the
       // extractor tracks functions/classes/consts) from a genuinely unknown path.
       const indexed = store.allFileHashes().some((f) => f.path === target);
@@ -316,9 +333,14 @@ export async function cmdImpact(rt: Runtime, target: string): Promise<void> {
     }
     const radius = await new SymbolGraph(store).blastRadius(seeds);
     // blastRadius includes the seeds themselves; the dependents are what's at risk.
-    const downstream = radius.symbols.filter((s) => !seeds.includes(s)).length;
+    const dependents = radius.symbols.filter((s) => !seeds.includes(s));
+    if (opts.json) {
+      const report: ImpactReport = { target, seeds, dependents, files: radius.files };
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
     console.log(
-      `impact of ${target}: ${seeds.length} symbol(s) → ${downstream} dependent(s) across ${radius.files.length} file(s):`,
+      `impact of ${target}: ${seeds.length} symbol(s) → ${dependents.length} dependent(s) across ${radius.files.length} file(s):`,
     );
     for (const f of radius.files) console.log(`  - ${f}${f === target ? '  (source)' : ''}`);
   } finally {
@@ -347,10 +369,33 @@ function printNeighbors(label: string, edges: SymbolNeighbors['dependsOn']): voi
  * defined in several files is reported as ambiguous so the operator can qualify it.
  * Read-only and WASM-free: opens the existing index directly and never creates it.
  */
-export async function cmdExplain(rt: Runtime, query: string): Promise<void> {
+/** Machine-readable shape of `archon explain --json` (a stable automation contract). */
+export interface ExplainReport {
+  query: string;
+  /** Qualified id the query resolved to, or null if unknown/ambiguous. */
+  resolved: string | null;
+  kind: string | null;
+  file: string | null;
+  dependsOn: SymbolNeighbors['dependsOn'];
+  dependedOnBy: SymbolNeighbors['dependedOnBy'];
+  /** Qualified ids when a bare name matched several files (else empty). */
+  candidates: string[];
+}
+
+export async function cmdExplain(rt: Runtime, query: string, opts: { json?: boolean } = {}): Promise<void> {
+  const empty = (candidates: string[] = []): ExplainReport => ({
+    query,
+    resolved: null,
+    kind: null,
+    file: null,
+    dependsOn: [],
+    dependedOnBy: [],
+    candidates,
+  });
   const indexPath = join(rt.root, rt.config.paths.index);
   if (!existsSync(indexPath)) {
-    console.log('explain: no index yet — run `archon index` first');
+    if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+    else console.log('explain: no index yet — run `archon index` first');
     return;
   }
   const store = new IndexStore(indexPath);
@@ -361,16 +406,35 @@ export async function cmdExplain(rt: Runtime, query: string): Promise<void> {
     const exact = all.find((s) => s.name === query);
     const matches = exact ? [exact] : all.filter((s) => bareName(s.name) === query);
     if (matches.length === 0) {
-      console.log(`explain: "${query}" is not an indexed symbol (try \`archon impact <file>\`, or re-run \`archon index\`)`);
+      if (opts.json) console.log(JSON.stringify(empty(), null, 2));
+      else
+        console.log(`explain: "${query}" is not an indexed symbol (try \`archon impact <file>\`, or re-run \`archon index\`)`);
       return;
     }
     if (matches.length > 1) {
+      if (opts.json) {
+        console.log(JSON.stringify(empty(matches.map((m) => m.name)), null, 2));
+        return;
+      }
       console.log(`explain: "${query}" is ambiguous — ${matches.length} definitions; qualify one:`);
       for (const m of matches) console.log(`  - ${m.name}  [${m.kind}]`);
       return;
     }
     const sym = matches[0];
     const { dependsOn, dependedOnBy } = new SymbolGraph(store).neighbors(sym.name);
+    if (opts.json) {
+      const report: ExplainReport = {
+        query,
+        resolved: sym.name,
+        kind: sym.kind,
+        file: sym.file,
+        dependsOn,
+        dependedOnBy,
+        candidates: [],
+      };
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
     console.log(`${sym.name}  [${sym.kind}]  defined in ${sym.file}`);
     printNeighbors('depends on', dependsOn); // its callees / imports
     printNeighbors('used by', dependedOnBy); // its callers / tests
@@ -387,10 +451,22 @@ export async function cmdExplain(rt: Runtime, query: string): Promise<void> {
  * repo-map in `rt.context` — this reports the raw graph, not a prompt.) Read-only
  * and WASM-free: opens the existing index directly and never creates it.
  */
-export async function cmdMap(rt: Runtime): Promise<void> {
+/** Machine-readable shape of `archon map --json` (a stable automation contract). */
+export interface MapReport {
+  files: number;
+  symbols: number;
+  edges: number;
+  /** Edge count keyed by kind (only kinds the extractor actually emitted). */
+  edgesByKind: Record<string, number>;
+  /** Most depended-on symbols, ranked by distinct-dependent count. */
+  hot: { name: string; dependents: number }[];
+}
+
+export async function cmdMap(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
   const indexPath = join(rt.root, rt.config.paths.index);
   if (!existsSync(indexPath)) {
-    console.log('map: no index yet — run `archon index` first');
+    if (opts.json) console.log(JSON.stringify({ files: 0, symbols: 0, edges: 0, edgesByKind: {}, hot: [] }, null, 2));
+    else console.log('map: no index yet — run `archon index` first');
     return;
   }
   const store = new IndexStore(indexPath);
@@ -398,17 +474,28 @@ export async function cmdMap(rt: Runtime): Promise<void> {
     const files = store.allFileHashes().length;
     const symbols = store.allSymbols();
     const edges = store.loadEdges();
+    // Edge-kind breakdown — count whatever kinds the extractor actually emitted.
+    const byKind = new Map<string, number>();
+    for (const e of edges) byKind.set(e.kind, (byKind.get(e.kind) ?? 0) + 1);
+    const hot = new SymbolGraph(store).hotNodes(10);
+    if (opts.json) {
+      const report: MapReport = {
+        files,
+        symbols: symbols.length,
+        edges: edges.length,
+        edgesByKind: Object.fromEntries(byKind),
+        hot,
+      };
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
     if (symbols.length === 0) {
       console.log(`map: ${files} file(s) indexed, but no symbols yet (run \`archon index\`)`);
       return;
     }
     console.log(`repo map: ${files} file(s) · ${symbols.length} symbol(s) · ${edges.length} edge(s)`);
-    // Edge-kind breakdown — count whatever kinds the extractor actually emitted.
-    const byKind = new Map<string, number>();
-    for (const e of edges) byKind.set(e.kind, (byKind.get(e.kind) ?? 0) + 1);
     const kinds = [...byKind.entries()].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${n} ${k}`);
     if (kinds.length > 0) console.log(`  edges: ${kinds.join(' · ')}`);
-    const hot = new SymbolGraph(store).hotNodes(10);
     if (hot.length === 0) {
       console.log('  most depended-on: (none — no dependency edges yet)');
       return;

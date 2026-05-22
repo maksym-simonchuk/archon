@@ -113,6 +113,21 @@ describe('archon map (graph overview)', () => {
     rt.close();
   });
 
+  it('emits a machine-readable report under --json', async () => {
+    const rt = await runtime();
+    seedGraph(rt.root);
+    const log = captured();
+    await cmdMap(rt, { json: true });
+    const report = JSON.parse(text(log));
+
+    expect(report.files).toBe(3);
+    expect(report.symbols).toBe(3);
+    expect(report.edges).toBe(3);
+    expect(report.edgesByKind).toEqual({ calls: 3 });
+    expect(report.hot[0]).toEqual({ name: 'src/a.ts#a', dependents: 2 }); // most depended-on first
+    rt.close();
+  });
+
   it('asks for an index when none exists, creating no db (read-only)', async () => {
     const rt = await runtime();
     const log = captured();
