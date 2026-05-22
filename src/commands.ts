@@ -239,7 +239,11 @@ export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string 
 export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {
   console.log(plannerLabel(rt.llmPlanning));
   const task = makeTask(goal, 'trusted');
+  // Print the id before running so it's known even if the loop throws mid-run —
+  // the partial journal is still inspectable via `archon status <id>`.
+  console.log(`run ${task.id}: ${goal}`);
   printResults(await rt.loop().run(task, await planContext(rt, task, goal, opts.skill)));
+  console.log(`  replay: archon status ${task.id}`);
 }
 
 export async function cmdIndex(rt: Runtime): Promise<void> {
