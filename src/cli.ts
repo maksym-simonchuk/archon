@@ -15,6 +15,7 @@ import {
   cmdPromote,
   cmdPromotions,
   cmdRun,
+  cmdSkills,
   cmdStatus,
   cmdTool,
 } from './commands';
@@ -37,6 +38,7 @@ Usage:
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon plugins          List loaded plugins + capability previews     (M7)
+  archon skills [name]    List skill playbooks, or print one            (M7)
   archon tool <name> [json]    Invoke a tool plugin (policy-gated)       (M7)
   archon --help           Show this help
 
@@ -100,6 +102,10 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdModel(rt));
     case 'plugins':
       return withRuntime(cmdPlugins);
+    case 'skills': {
+      const [name] = rest;
+      return withRuntime((rt) => cmdSkills(rt, name));
+    }
     case 'tool': {
       const [name, ...more] = rest;
       if (!name) return usageError('tool <name> [json-input]');

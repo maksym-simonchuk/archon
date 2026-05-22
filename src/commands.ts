@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
 import type { JournalEntry, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
+import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
 import { TaskJournal } from './services/task-journal';
 
@@ -406,6 +407,36 @@ export async function cmdPlugins(rt: Runtime): Promise<void> {
     const runnable = decisions.every((d) => d.decision === 'allow');
     const caps = decisions.length ? decisions.map((d) => `${d.action}=${d.decision}`).join(', ') : '(no capabilities)';
     console.log(`  ${runnable ? '✓' : '⚠'} ${manifest.name}@${manifest.version}  [${manifest.kind}]  ${caps}`);
+  }
+}
+
+/**
+ * List loaded `skill`-kind plugins, or print one skill's full playbook by name.
+ * A skill is a reusable procedural playbook (Markdown) the planner can follow;
+ * this is the discovery surface for the 5th ABI kind. Strictly read-only —
+ * printing a playbook exercises no capability, so (like `archon plugins`) it
+ * needs no broker gate. See ADR-0009.
+ */
+export async function cmdSkills(rt: Runtime, name?: string): Promise<void> {
+  const skills = (await rt.pluginHost()).list().filter((p): p is SkillPlugin => p.kind === 'skill');
+  if (skills.length === 0) {
+    console.log('skills: none loaded — drop one at .archon/plugins/<name>/plugin.mjs (kind: "skill")');
+    return;
+  }
+  if (name) {
+    const skill = skills.find((s) => s.manifest.name === name);
+    if (!skill) {
+      console.log(`skills: no skill "${name}" — loaded: ${skills.map((s) => s.manifest.name).join(', ')}`);
+      return;
+    }
+    console.log(`# skill: ${skill.manifest.name}@${skill.manifest.version}\n`);
+    console.log(skill.playbook);
+    return;
+  }
+  console.log(`skills: ${skills.length} loaded — \`archon skills <name>\` to view a playbook:`);
+  for (const { manifest, playbook } of skills) {
+    const summary = playbook.split('\n').find((l) => l.trim())?.trim() ?? '(empty playbook)';
+    console.log(`  - ${manifest.name}@${manifest.version}  ${summary.slice(0, 60)}`);
   }
 }
 

@@ -14,6 +14,7 @@ import {
   cmdPromote,
   cmdPromotions,
   cmdRun,
+  cmdSkills,
   cmdStatus,
   cmdTool,
   plannerLabel,
@@ -48,6 +49,7 @@ const COMMANDS = [
   '/memory',
   '/promote',
   '/plugins',
+  '/skills',
   '/tool',
   '/help',
   '/exit',
@@ -67,6 +69,7 @@ const SHELL_HELP = `commands:
   /memory [goal]   no arg: promotion candidates · <goal>: recall episodes
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
+  /skills [name]   list skill playbooks · <name>: print one
   /tool <name> [json]  invoke a tool plugin (policy-gated)
   /help            this help
   /exit, /quit     leave the shell  (Ctrl-D also works)
@@ -175,6 +178,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     case '/plugins':
       await cmdPlugins(rt);
+      return true;
+    case '/skills':
+      await cmdSkills(rt, arg || undefined);
       return true;
     case '/tool': {
       const [name, ...more] = rest;
