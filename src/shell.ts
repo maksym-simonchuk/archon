@@ -45,6 +45,7 @@ import {
 } from './commands';
 import type { ChangeKind } from './cognition/preservation';
 import { buildRuntime, type Runtime } from './runtime';
+import { type TreeWatcher, watchTree } from './sensing/fs-watcher';
 
 const HISTORY_FILE = 'shell_history';
 const HISTORY_MAX = 1000;
@@ -112,7 +113,7 @@ const SHELL_HELP = `commands:
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
-  /watch [--loop|--stop]  reindex changed files + refresh health · --loop polls in the background
+  /watch [--loop|--stop]  reindex changed files + refresh health · --loop watches live (fs events) in the background
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
@@ -507,41 +508,55 @@ export async function startShell(): Promise<void> {
   // own (we register later), so rl.line/rl.cursor are already updated.
   let busy = false;
 
-  // ── /watch background poller (M22 daemon, in-process) ──────────────────────
-  // A timer that incrementally reindexes the dirty subtree and refreshes health
-  // without re-running a command. Skips a tick while a command is mid-output
-  // (reuses `busy`), unref'd so it never keeps the process alive on its own, and
-  // redraws the prompt after each tick so background output doesn't strand it.
+  // ── /watch background daemon (M22, in-process) ─────────────────────────────
+  // Incrementally reindexes the dirty subtree and refreshes health without
+  // re-running a command. Prefers a real recursive `fs.watch` (event-driven —
+  // a tick runs only when a source file actually changes); on platforms without
+  // recursive watch it falls back to a poller. A tick skips while a command is
+  // mid-output (reuses `busy`), and redraws the prompt afterwards so background
+  // output never strands it.
   const WATCH_INTERVAL_MS = 2000;
-  let watchTimer: NodeJS.Timeout | undefined;
+  let watchHandle: TreeWatcher | undefined; // event-driven watcher (preferred)
+  let watchTimer: NodeJS.Timeout | undefined; // poller fallback
+  const runWatchTick = (): void => {
+    if (busy) return; // don't interleave a tick with a running command's output
+    busy = true;
+    void cmdWatch(rt, session.watchDirty)
+      .then((next) => {
+        session.watchDirty = next;
+      })
+      .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
+      .finally(() => {
+        busy = false;
+        rl.prompt(true); // redraw the prompt beneath any tick output
+      });
+  };
   const startWatchLoop = (): void => {
-    if (watchTimer) {
+    if (watchHandle || watchTimer) {
       console.log('watch: already running — /watch --stop to stop');
       return;
     }
-    console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s — /watch --stop to stop`);
-    watchTimer = setInterval(() => {
-      if (busy) return; // don't interleave a tick with a running command's output
-      busy = true;
-      void cmdWatch(rt, session.watchDirty)
-        .then((next) => {
-          session.watchDirty = next;
-        })
-        .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
-        .finally(() => {
-          busy = false;
-          rl.prompt(true); // redraw the prompt beneath any tick output
-        });
-    }, WATCH_INTERVAL_MS);
-    watchTimer.unref?.();
+    watchHandle = watchTree(rt.root, runWatchTick);
+    if (watchHandle) {
+      console.log('watch: live (fs events) — /watch --stop to stop');
+    } else {
+      console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s (fs events unavailable) — /watch --stop to stop`);
+      watchTimer = setInterval(runWatchTick, WATCH_INTERVAL_MS);
+      watchTimer.unref?.();
+    }
+    runWatchTick(); // an immediate first tick so the current state is reported
   };
   const stopWatchLoop = (): void => {
-    if (!watchTimer) {
+    if (!watchHandle && !watchTimer) {
       console.log('watch: not running');
       return;
     }
-    clearInterval(watchTimer);
-    watchTimer = undefined;
+    watchHandle?.close();
+    watchHandle = undefined;
+    if (watchTimer) {
+      clearInterval(watchTimer);
+      watchTimer = undefined;
+    }
     console.log('watch: stopped');
   };
   // Repaint the dimmed suggestion after the cursor, then move the cursor back to
@@ -615,7 +630,7 @@ export async function startShell(): Promise<void> {
       frame();
     }
   } finally {
-    if (watchTimer) stopWatchLoop();
+    if (watchHandle || watchTimer) stopWatchLoop();
     rl.close();
     rt.close();
     saveHistory(historyFile, history);

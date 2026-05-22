@@ -35,14 +35,14 @@ The spec asks for a *repository operating system*. What exists today is the
 | Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
 | Philosophy + economics + confidence layers | ⬜ | None |
 | Autonomous improvement (`ai improve`/`refactor`/migration plans) | ✅ `improve` proposes ranked, ROI-gated, preservation-safe changes; `refactor` applies one through the simulation/preservation gate + a capability-scoped agent + worktree | engineering-economics ROI *ceiling* deferred |
-| Daemon runtime (`ai watch`, FS/AST watchers) | ⬜ | Incremental indexer exists; no daemon/watcher |
+| Daemon runtime (`ai watch`, FS/AST watchers) | ✅ event-driven `fs.watch` daemon (`/watch --loop`) → debounced incremental re-index + health refresh; poller fallback | Sub-file AST-segment invalidation deferred (per-file hash-gate suffices); TUI `--loop` deferred |
 | Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | ✅ | All four wired; strength-scored routing + budget breaker + fallback (M23) |
 | Accurate parsing + real vector store | ✅ | Host-side ts-morph parser (tree-sitter unusable in wasm32); persisted memory_vectors + cosineTopK recall (M24) |
 
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
 `violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ✅(simulation-gated, agent-scoped) ·
-`boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
+`boundaries` ✅ · `watch` ✅(incremental tick + live `--loop` fs-event daemon, poller fallback) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
 `explain` 🟡(symbol≠architecture reasoning) · `recap` ✅(per-run journal digest + health trend) · `skill` ✅(executable multi-phase `safe-refactor`: analyze→simulate→validate→execute, gated + reversible).
 
 ---
@@ -153,12 +153,13 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 
 ### Phase D — Infrastructure
 
-#### M22 — Daemon Runtime (`watch`) 🟡 (in-process poller shipped)
+#### M22 — Daemon Runtime (`watch`) ✅ (FS-event watcher + incremental tick)
 - Goal: continuous intelligence without re-running commands.
 - Build: `archon watch` daemon — FS watcher → git-diff/AST-aware incremental re-index of only the affected graph segment; symbol-level cache; background low-cost analysis.
 - Deps: M8, M12. Exit: editing one file re-indexes only its subtree live; violations refresh in the background.
-- Shipped: pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand; `/watch --loop` starts an unref'd in-process background poller (2s) in the line shell that reindexes + refreshes health without re-running a command, `/watch --stop` ends it. `dirtyPaths` now degrades to `[]` outside a git repo, like `commitHistory`.
-- Deferred: a real FS-event watcher (vs git-status polling), AST-segment-level invalidation, and `--loop` inside the full-screen TUI render loop (the line shell carries the daemon for now; the TUI gets the single-tick `/watch`).
+- Shipped (tick): pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand. `dirtyPaths` degrades to `[]` outside a git repo, like `commitHistory`.
+- Shipped (FS-event watcher): `src/sensing/fs-watcher.ts` — zero-dep, built on Node's native recursive `fs.watch`. `isWatchable` filters events to JS/TS source files outside noise dirs (node_modules/.git/dist/.archon/…); `ChangeBatcher` debounces a burst of edits into one sorted, deduplicated batch (injectable timer → unit-tested with a manual clock, no real FS/clock); `watchTree(root, onBatch)` wires `fs.watch` into the batcher and returns a stop handle, or `undefined` where recursive watch is unsupported. `/watch --loop` now runs **event-driven** — a tick fires only when a source file actually changes (no 2s polling) — and falls back to the interval poller when `watchTree` returns `undefined`; `/watch --stop` ends it. Like the Indexer, the watcher is a Sensing-plane reader: it only observes, so it reads `fs` directly (the effecting-isolation invariant scans cognition/effecting, not sensing).
+- Deferred (non-blocking): sub-file AST-segment-level invalidation (the Indexer already hash-gates per file, so a changed file fully reparses — fast for the small files here) and `--loop` inside the full-screen TUI render loop (the line shell carries the live daemon; the TUI keeps the single-tick `/watch`).
 
 #### M23 — Provider Orchestration completion ✅
 - Goal: route each task to the provider that fits it.
