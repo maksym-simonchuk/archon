@@ -193,6 +193,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/agents': 'project-native agents the stack implies',
   '/agent': 'bind the best-fit agent to a goal (--run to execute)',
   '/improve': 'conservative, ROI-ranked improvements',
+  '/refactor': 'apply a proposal, simulation-gated, under an agent',
   '/hooks': 'pre-write gate + post-write checks',
   '/simulate': 'predict blast radius + regression before applying',
   '/path': 'shortest dependency chain a → b',

@@ -152,6 +152,28 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/refactor reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/refactor')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/refactor rejects a bad --pick value', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/refactor --pick -1')).toBe(true);
+      expect(text(log)).toContain('usage: /refactor');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/agent asks for a goal when given none', async () => {
     const rt = await runtime();
     const log = captured();

@@ -29,6 +29,7 @@ import {
   cmdPreserve,
   cmdPromote,
   cmdPromotions,
+  cmdRefactor,
   cmdRisk,
   cmdRun,
   cmdSh,
@@ -81,6 +82,7 @@ export const COMMANDS = [
   '/agents',
   '/agent',
   '/improve',
+  '/refactor',
   '/hooks',
   '/simulate',
   '/path',
@@ -120,6 +122,7 @@ const SHELL_HELP = `commands:
   /agents          project-native agents the stack + topology imply
   /agent [--run] <goal>  bind the best-fit agent to a goal — plan under it, or --run to execute scoped
   /improve         conservative, ROI-ranked, preservation-gated improvement proposals
+  /refactor [--pick N] [--force]  apply a proposal, simulation-gated, under a scoped agent
   /hooks           pre-write gate (forbidden-import/boundary/never-modify) + post-write checks
   /simulate <file> [change]  predict blast radius + regression probability before applying
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
@@ -189,6 +192,7 @@ function argCandidates(head: string, words: string[]): string[] {
       return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
+  if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
   if ((head === '/preserve' || head === '/simulate') && words.length === 3)
@@ -358,6 +362,13 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/improve':
       await cmdImprove(rt);
       return true;
+    case '/refactor': {
+      const { value: pick, rest: r } = extractFlag(rest, '--pick');
+      const n = pick !== undefined ? Number(pick) : undefined;
+      if (n !== undefined && (!Number.isInteger(n) || n < 0)) console.log('usage: /refactor [--pick <n≥0>] [--force]');
+      else await cmdRefactor(rt, { pick: n, force: r.includes('--force') });
+      return true;
+    }
     case '/hooks':
       await cmdHooks(rt);
       return true;

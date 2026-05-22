@@ -34,14 +34,14 @@ The spec asks for a *repository operating system*. What exists today is the
 | Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
 | Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
 | Philosophy + economics + confidence layers | ⬜ | None |
-| Autonomous improvement (`ai improve`/`refactor`/migration plans) | 🟡 `improve` proposes ranked, ROI-gated, preservation-safe changes | `refactor` apply path through the loop deferred (M21 note) |
+| Autonomous improvement (`ai improve`/`refactor`/migration plans) | ✅ `improve` proposes ranked, ROI-gated, preservation-safe changes; `refactor` applies one through the simulation/preservation gate + a capability-scoped agent + worktree | engineering-economics ROI *ceiling* deferred |
 | Daemon runtime (`ai watch`, FS/AST watchers) | ⬜ | Incremental indexer exists; no daemon/watcher |
 | Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | 🟡 anthropic+openai | No Gemini, no local; routing exists |
 | Rust core: tree-sitter, real vector store | 🟡 heuristic parser + `cosine_topk` | tree-sitter deferred; no persisted vector index |
 
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
-`violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ⬜ ·
+`violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ✅(simulation-gated, agent-scoped) ·
 `boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
 `explain` 🟡(symbol≠architecture reasoning).
 
@@ -141,12 +141,13 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Shipped: pure `simulateExecution` (`src/cognition/simulation.ts`) — composes M9 cycles + M13 risk/confidence + M14 preservation + M15 churn + the symbol graph's reverse-reachability into one pre-apply prediction: **dependency propagation** (downstream symbols/files/modules), **type-system impact** (downstream importers), **API-contract drift** (other modules depending on the changed surface), **boundary state** (target module in a cycle), and a **regression-probability** estimate (`hazard` = reach + criticality + volatility, scaled by test-coverage `exposure`). Yields an advisory autonomy verdict `auto` | `review` | `block` (block on never-modify / preserve; review on high risk / regression ≥ 0.6 / preservation caution / cyclic boundary). `/simulate <file> [change]` (`cmdSimulate`); the regression estimate names every factor so the prediction is auditable. No new deps.
 - Deferred: turning the verdict into a **hard pre-apply gate** on the loop's worktree write path (the M20→loop wire, alongside the deferred M13/M14 gating and the M19 pre-hook wire) — shipped as advisory, like risk/preservation, so it never silently blocks until that path is safety-reviewed.
 
-#### M21 — Autonomous Improvement (`improve` / `refactor` / migration `plan`) 🟡 (`improve` shipped)
+#### M21 — Autonomous Improvement (`improve` / `refactor` / migration `plan`) ✅ (`improve` + `refactor` shipped)
 - Goal: conservative evolution — better repo, preserved identity.
 - Build: `improve` (safe migration plans, ADR suggestions, dependency cleanup, perf, modularization, testing-gap proposals); `refactor` (constrained execution through M19/M20); engineering-economics gate (cost-of-change / maintenance overhead / ROI) to avoid over-engineering.
 - Deps: M14, M19, M20. Exit: `improve` proposes ranked, ROI-gated changes that never touch NEVER-MODIFY zones; `refactor` applies one through the simulation+hooks+worktree path.
 - Shipped: pure `proposeImprovements` (`src/cognition/improve.ts`) maps each M12 violation to a conservative, structure-preserving action (`break-cycle`, `decompose`, `realign-dependency`, `add-tests`), scores ROI = impact / effort, and ranks. Every proposal is gated through the M14 Preservation Layer (`protectedModules` in the command): a module ruled `preserve` (intentional / never-modify) is reported as **preserved, not auto-proposed**. `/improve` (`cmdImprove`). Read-only — it proposes; it never applies.
-- Deferred: `refactor` (the apply path through worktree + hooks + simulation) and the explicit engineering-economics ROI ceiling beyond value/effort.
+- `refactor` shipped (`cmdRefactor`, `/refactor [--pick N] [--force]`): takes the top-ranked `improve` proposal (or `--pick N`), resolves a representative source file in the subject module, and runs it through the **M20 execution-simulation + M14 preservation pre-apply gate** (`assembleSimulation`, shared with `simulate`) — a `block` verdict refuses outright, a `review` verdict needs explicit `--force` (the human gate, constrained autonomy). If allowed, it executes under the best-fit, **capability-scoped agent** (`selectAgent` + `loop(agent)`, M18) through the same worktree transaction as every loop run, so a failing verify discards it — nothing is applied blindly. Reuses the agent broker's capability scoping for "constrained execution".
+- Deferred: the explicit engineering-economics ROI *ceiling* beyond value/effort, and turning the simulation gate into an unbypassable check inside the loop itself (it gates at the `refactor` command today; making it loop-internal is the same safety-path wire as M13/M19/M20).
 
 ### Phase D — Infrastructure
 
