@@ -36,8 +36,8 @@ The spec asks for a *repository operating system*. What exists today is the
 | Philosophy + economics + confidence layers | ⬜ | None |
 | Autonomous improvement (`ai improve`/`refactor`/migration plans) | ✅ `improve` proposes ranked, ROI-gated, preservation-safe changes; `refactor` applies one through the simulation/preservation gate + a capability-scoped agent + worktree | engineering-economics ROI *ceiling* deferred |
 | Daemon runtime (`ai watch`, FS/AST watchers) | ⬜ | Incremental indexer exists; no daemon/watcher |
-| Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | 🟡 anthropic+openai | No Gemini, no local; routing exists |
-| Rust core: tree-sitter, real vector store | 🟡 heuristic parser + `cosine_topk` | tree-sitter deferred; no persisted vector index |
+| Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | ✅ | All four wired; strength-scored routing + budget breaker + fallback (M23) |
+| Accurate parsing + real vector store | ✅ | Host-side ts-morph parser (tree-sitter unusable in wasm32); persisted memory_vectors + cosineTopK recall (M24) |
 
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
