@@ -3,8 +3,10 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { ModelSpec } from './core/types';
 import { buildRuntime, type Runtime } from './runtime';
-import { completeShell, dispatch, loadHistory, saveHistory } from './shell';
+import { ProviderRouter, type ProviderClient } from './services/provider-router';
+import { completeShell, dispatch, loadHistory, newSession, saveHistory } from './shell';
 
 const POLICY = readFileSync(join(process.cwd(), '.archon/policy.yaml'), 'utf8');
 
@@ -81,6 +83,46 @@ describe('shell dispatch', () => {
     } finally {
       rt.close();
     }
+  });
+});
+
+describe('shell conversational /ask', () => {
+  const model: ModelSpec = {
+    id: 'm',
+    provider: 'fake',
+    contextWindow: 1000,
+    costPer1kInput: 0,
+    costPer1kOutput: 0,
+    strengths: ['summarize'],
+  };
+  const askClient: ProviderClient = {
+    provider: 'fake',
+    complete: () => Promise.reject(new Error('unused on /ask path')),
+    completeObject: () => Promise.reject(new Error('unused on /ask path')),
+    completeStream: () => {
+      async function* gen(): AsyncGenerator<string> {
+        yield 'ok';
+      }
+      return { textStream: gen(), usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }) };
+    },
+  };
+  // dispatch only touches `llmPlanning` + `router` on the /ask path.
+  const streamingRt = (router: ProviderRouter): Runtime => ({ llmPlanning: true, router }) as unknown as Runtime;
+
+  it('accumulates /ask turns in the session and /clear resets them', async () => {
+    vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write);
+    const log = captured();
+    const rt = streamingRt(new ProviderRouter([model], [askClient]));
+    const session = newSession();
+
+    await dispatch(rt, '/ask what stack?', session);
+    await dispatch(rt, '/ask and the PM?', session);
+    expect(session.askHistory).toHaveLength(2);
+    expect(session.askHistory[0]).toEqual({ question: 'what stack?', answer: 'ok' });
+
+    expect(await dispatch(rt, '/clear', session)).toBe(true);
+    expect(session.askHistory).toHaveLength(0);
+    expect(text(log)).toContain('context cleared');
   });
 });
 

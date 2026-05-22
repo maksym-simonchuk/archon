@@ -77,7 +77,9 @@ async function main(argv: string[]): Promise<void> {
       return withRuntime((rt) => cmdRun(rt, goal));
     case 'ask':
       if (!goal) return usageError('ask <question>');
-      return withRuntime((rt) => cmdAsk(rt, goal));
+      return withRuntime(async (rt) => {
+        await cmdAsk(rt, goal); // one-shot: no transcript, discard the returned text
+      });
     case 'status':
       return withRuntime(cmdStatus);
     case 'doctor':

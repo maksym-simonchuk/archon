@@ -2,6 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
+  type AskTurn,
   cmdAsk,
   cmdDoctor,
   cmdIndex,
@@ -20,12 +21,21 @@ import { buildRuntime, type Runtime } from './runtime';
 const PROMPT = 'archon› ';
 const HISTORY_FILE = 'shell_history';
 const HISTORY_MAX = 1000;
+/** Cap on prior /ask turns fed back into the model — bounds prompt growth + cost. */
+const ASK_CONTEXT_TURNS = 8;
+
+/** Mutable per-REPL state that must persist across dispatched lines (the /ask transcript). */
+export interface ShellSession {
+  askHistory: AskTurn[];
+}
+export const newSession = (): ShellSession => ({ askHistory: [] });
 
 /** Every slash command the shell understands — drives tab-completion. */
 const COMMANDS = [
   '/plan',
   '/run',
   '/ask',
+  '/clear',
   '/index',
   '/status',
   '/doctor',
@@ -41,7 +51,8 @@ const COMMANDS = [
 const SHELL_HELP = `commands:
   /plan <goal>     plan a task — no writes
   /run <goal>      plan → act → verify under a worktree transaction
-  /ask <question>  stream a freeform answer (read-only)
+  /ask <question>  stream a freeform answer (read-only); remembers prior /ask turns
+  /clear           forget the /ask conversation context
   /index           incrementally index changed files
   /status          task journal + budgets
   /doctor          runtime readiness (planner/keys/state/plugins)
@@ -89,7 +100,7 @@ export function saveHistory(file: string, history: string[]): void {
  * driving readline. Returns false only for /exit · /quit (signals the REPL to
  * stop); every other input returns true.
  */
-export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
+export async function dispatch(rt: Runtime, input: string, session: ShellSession = newSession()): Promise<boolean> {
   const [head, ...rest] = input.split(/\s+/);
   const arg = rest.join(' ').trim();
   const needGoal = (): boolean => {
@@ -112,7 +123,14 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
       if (needGoal()) await cmdRun(rt, arg);
       return true;
     case '/ask':
-      if (needGoal()) await cmdAsk(rt, arg);
+      if (needGoal()) {
+        const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS));
+        if (answer) session.askHistory.push({ question: arg, answer });
+      }
+      return true;
+    case '/clear':
+      session.askHistory = [];
+      console.log('context cleared');
       return true;
     case '/index':
       await cmdIndex(rt);
@@ -158,6 +176,7 @@ export async function dispatch(rt: Runtime, input: string): Promise<boolean> {
  */
 export async function startShell(): Promise<void> {
   const rt = await buildRuntime(process.cwd());
+  const session = newSession(); // one /ask transcript for the whole REPL lifetime
   const historyFile = join(rt.root, '.archon', HISTORY_FILE);
   let history = loadHistory(historyFile);
   const rl = createInterface({
@@ -184,7 +203,7 @@ export async function startShell(): Promise<void> {
       const input = line.trim();
       if (input) {
         try {
-          if (!(await dispatch(rt, input))) break;
+          if (!(await dispatch(rt, input, session))) break;
         } catch (e) {
           console.error(`[archon] ${msg(e)}`);
         }

@@ -58,24 +58,38 @@ export function journalHint(e: JournalEntry): string {
   }
 }
 
+/** One prior question/answer pair, threaded back into a later /ask for continuity. */
+export interface AskTurn {
+  question: string;
+  answer: string;
+}
+
 /**
  * Stream a freeform answer from the provider, token by token (the shell's
  * "typing" feel). Read-only: it routes through `summarize` (a cheap model) and
  * proposes no effects, so nothing is broker-gated. Requires an LLM provider —
- * the offline scaffolder cannot stream.
+ * the offline scaffolder cannot stream. Prior turns (the shell's session
+ * transcript) are woven into the prompt so the conversation carries context; the
+ * one-shot CLI passes none. Returns the full answer so the caller can append it
+ * to the transcript (empty string when no provider is configured).
  */
-export async function cmdAsk(rt: Runtime, question: string): Promise<void> {
+export async function cmdAsk(rt: Runtime, question: string, history: readonly AskTurn[] = []): Promise<string> {
   if (!rt.llmPlanning) {
     console.log('ask: no LLM provider configured — set a provider key (see `archon doctor`)');
-    return;
+    return '';
   }
-  const prompt = `Answer concisely for an engineer working in this repository.\n\nQuestion: ${question}\n`;
-  const { modelId, costUsd } = await rt.router.streamComplete(
+  const prior = history.map((t) => `Q: ${t.question}\nA: ${t.answer}`).join('\n\n');
+  const prompt =
+    'Answer concisely for an engineer working in this repository.\n\n' +
+    (prior ? `Conversation so far:\n${prior}\n\n` : '') +
+    `Question: ${question}\n`;
+  const { modelId, text, costUsd } = await rt.router.streamComplete(
     { taskClass: 'summarize', prompt, maxTokens: 1024 },
     (chunk) => process.stdout.write(chunk),
   );
   process.stdout.write('\n');
   console.log(`— ${modelId} ($${costUsd.toFixed(4)})`);
+  return text;
 }
 
 export async function cmdPlan(rt: Runtime, goal: string): Promise<void> {
