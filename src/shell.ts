@@ -104,7 +104,7 @@ export const COMMANDS = [
 
 const SHELL_HELP = `commands:
   /plan [--skill <name>] <goal>   plan a task — no writes
-  /run  [--skill <name>] <goal>   plan → act → verify under a worktree transaction
+  /run  [--skill <name>] [--force] <goal>  plan → act → verify (--force overrides the preservation gate)
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
@@ -281,9 +281,10 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     }
     case '/run': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
-      const g = r.join(' ').trim();
-      if (g) await cmdRun(rt, g, { skill });
-      else console.log('usage: /run [--skill <name>] <goal>');
+      const force = r.includes('--force');
+      const g = r.filter((t) => t !== '--force').join(' ').trim();
+      if (g) await cmdRun(rt, g, { skill, force });
+      else console.log('usage: /run [--skill <name>] [--force] <goal>');
       return true;
     }
     case '/ask':

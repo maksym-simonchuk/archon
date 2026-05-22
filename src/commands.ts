@@ -16,14 +16,14 @@ import { analyzeEvolution, type EvolutionModel, formatEvolution } from './sensin
 import { detectViolations, formatViolations, moduleConfidence, type ViolationReport } from './sensing/violations';
 import { type FileRisk, formatRisk, scoreRisk } from './cognition/risk';
 import { analyzeStructure } from './sensing/structural-analyzer';
-import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile, type PhilosophySignals } from './sensing/philosophy';
+import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile } from './sensing/philosophy';
 import { assessPreservation, type ChangeKind, formatPreservation } from './cognition/preservation';
 import { type AgentSpec, formatAgents, generateAgents } from './cognition/agent-factory';
 import { agentBriefing, selectAgent } from './cognition/agent-runtime';
 import { formatImprovements, type ImprovementAction, proposeImprovements } from './cognition/improve';
-import { formatSimulation, simulateExecution, type SimulationReport } from './cognition/simulation';
+import { formatSimulation } from './cognition/simulation';
+import { assembleSimulation, fingerprintAndModel, philosophySignals } from './simulation-assembly';
 import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
-import type { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { changedSince, formatWatchTick } from './sensing/watch';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
@@ -285,13 +285,17 @@ export interface RunReport {
   steps: { stepId: string; passed: boolean; files: string[]; failingChecks: string[] }[];
 }
 
-export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string; json?: boolean } = {}): Promise<void> {
+export async function cmdRun(
+  rt: Runtime,
+  goal: string,
+  opts: { skill?: string; json?: boolean; force?: boolean } = {},
+): Promise<void> {
   const task = makeTask(goal, 'trusted');
   const context = await planContext(rt, task, goal, opts.skill);
   if (opts.json) {
     // stdout carries only this document — planContext diagnostics go to stderr —
     // so `archon run --json | jq .merged` is a safe CI gate.
-    const results = await rt.loop().run(task, context);
+    const results = await rt.loop(undefined, { force: opts.force }).run(task, context);
     const report: RunReport = {
       taskId: task.id,
       goal,
@@ -310,7 +314,7 @@ export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string; 
   // Print the id before running so it's known even if the loop throws mid-run —
   // the partial journal is still inspectable via `archon status <id>`.
   console.log(`run ${task.id}: ${goal}`);
-  printResults(await rt.loop().run(task, context));
+  printResults(await rt.loop(undefined, { force: opts.force }).run(task, context));
   console.log(`  replay: archon status ${task.id}`);
 }
 
@@ -698,53 +702,6 @@ export async function cmdRisk(rt: Runtime, target: string, opts: { json?: boolea
 }
 
 /**
- * Gather the scalar signals the philosophy engine (M11) needs but cannot infer
- * from the index alone: typing strictness (from tsconfig), overall test ratio,
- * source-file count, and source basenames. Reads tsconfig once; tolerates JSONC.
- */
-async function philosophySignals(
-  root: string,
-  fingerprint: ArchitecturalFingerprint,
-  files: { path: string }[],
-): Promise<PhilosophySignals> {
-  const typed = fingerprint.languages.includes('typescript');
-  let strictTypes = false;
-  if (typed) {
-    const text = await readFile(join(root, 'tsconfig.json'), 'utf8').catch(() => '');
-    try {
-      const cfg = JSON.parse(text) as { compilerOptions?: { strict?: boolean } };
-      strictTypes = cfg.compilerOptions?.strict === true;
-    } catch {
-      strictTypes = /"strict"\s*:\s*true/.test(text); // tsconfig with comments
-    }
-  }
-  const isTest = (p: string): boolean => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p);
-  const isSource = (p: string): boolean => /\.[cm]?[jt]sx?$/.test(p) && !p.endsWith('.d.ts');
-  const source = files.map((f) => f.path.replace(/\\/g, '/')).filter(isSource);
-  const tests = source.filter(isTest);
-  const nonTest = source.filter((p) => !isTest(p));
-  const testRatio = nonTest.length === 0 ? 0 : Math.min(1, tests.length / nonTest.length);
-  return {
-    strictTypes,
-    typed,
-    testRatio,
-    fileCount: nonTest.length,
-    sourceBasenames: nonTest.map((p) => p.split('/').pop() ?? p),
-  };
-}
-
-/** Load fingerprint (persisted by `init`) falling back to a live structural scan, plus the boundary model. */
-async function fingerprintAndModel(
-  rt: Runtime,
-  store: IndexStore,
-): Promise<{ fingerprint: ArchitecturalFingerprint; model: BoundaryModel; files: { path: string }[] }> {
-  const files = store.allFileHashes();
-  const fingerprint = store.getFingerprint() ?? (await analyzeStructure(rt.root));
-  const model = store.loadModuleIntelligence() ?? inferBoundaries(files, store.loadFileEdges());
-  return { fingerprint, model, files };
-}
-
-/**
  * Convention & philosophy profile (M11): the project's engineering culture
  * (typing strictness, abstraction tolerance, layering, stability bias, scale,
  * naming) inferred from the fingerprint + boundary model + scalar signals.
@@ -759,7 +716,7 @@ export async function cmdPhilosophy(rt: Runtime, opts: { json?: boolean } = {}):
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const profile = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     if (opts.json) console.log(JSON.stringify(profile, null, 2));
     else console.log(formatPhilosophy(profile));
@@ -789,7 +746,7 @@ export async function cmdPreserve(
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     if (!files.some((f) => f.path === target)) {
       if (opts.json) console.log(JSON.stringify(null));
       else console.log(`preserve: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
@@ -849,7 +806,7 @@ export async function cmdAgents(rt: Runtime, opts: { json?: boolean } = {}): Pro
 
 /** Assemble the project-native agent roster from the index (shared by `agents` + `agent`). */
 async function agentRoster(rt: Runtime, store: IndexStore): Promise<AgentSpec[]> {
-  const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+  const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
   const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
   return generateAgents(fingerprint, model, philosophy);
 }
@@ -943,7 +900,7 @@ export async function cmdImprove(rt: Runtime, opts: { json?: boolean } = {}): Pr
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const report = detectViolations(buildViolationInput(store));
     const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     const definedFiles = new Set(store.allSymbols().map((s) => s.file));
@@ -985,7 +942,7 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   const { indexer, store, close } = await rt.indexer();
   let run: { agent: AgentSpec; goal: string } | undefined;
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     const definedFiles = new Set(store.allSymbols().map((s) => s.file));
     const protectedSubjects = protectedModules(model, files, definedFiles, philosophy);
@@ -1017,7 +974,7 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
 
     // M20/M14 pre-apply gate — constrained autonomy: never apply a blocked change;
     // a `review` verdict needs an explicit --force.
-    const sim = await assembleSimulation(rt, indexer, store, target, CHANGE_BY_ACTION[proposal.action]);
+    const sim = await assembleSimulation(rt.root, indexer, store, target, CHANGE_BY_ACTION[proposal.action]);
     if (sim) {
       console.log(
         `  simulate(${target}): ${sim.recommendation} · regression ${Math.round(sim.regression.probability * 100)}% · blast ${sim.propagation.files} file(s)`,
@@ -1049,7 +1006,10 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   const context = `${agentBriefing(run.agent)}\n\n${await planContext(rt, task, run.goal)}`;
   console.log(`  agent: ${run.agent.id} (${run.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)}`);
   console.log(`  run ${task.id}`);
-  printResults(await rt.loop(run.agent).run(task, context));
+  // `refactor` already ran the M14/M20 simulation gate at the command layer
+  // (block refused, review needed --force), so the loop's own preservation gate
+  // would be a redundant second block — pass force to defer to the command gate.
+  printResults(await rt.loop(run.agent, { force: true }).run(task, context));
   console.log(`  replay: archon status ${task.id}`);
 }
 
@@ -1078,7 +1038,7 @@ export async function cmdSimulate(
   // churn signal that feeds the regression estimate's volatility term.
   const { indexer, store, close } = await rt.indexer();
   try {
-    const report = await assembleSimulation(rt, indexer, store, target, change);
+    const report = await assembleSimulation(rt.root, indexer, store, target, change);
     if (report === null) {
       if (opts.json) console.log(JSON.stringify(null));
       else console.log(`simulate: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
@@ -1089,70 +1049,6 @@ export async function cmdSimulate(
   } finally {
     close();
   }
-}
-
-/**
- * Assemble the M20 pre-apply simulation for a change to `target` (shared by
- * `simulate` and the `refactor` apply-gate). Composes M9 boundaries + M13 risk +
- * M14 preservation + M15 churn + the symbol graph into one prediction with an
- * advisory `auto`/`review`/`block` verdict. Returns null when `target` is not an
- * indexed file. Read-only.
- */
-async function assembleSimulation(
-  rt: Runtime,
-  indexer: Indexer,
-  store: IndexStore,
-  target: string,
-  change: ChangeKind,
-): Promise<SimulationReport | null> {
-  const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
-  if (!files.some((f) => f.path === target)) return null;
-
-  const all = store.allSymbols();
-  const definedFiles = new Set(all.map((s) => s.file));
-  const seeds = all.filter((s) => s.file === target).map((s) => s.name);
-  const radius = seeds.length > 0 ? await new SymbolGraph(store).blastRadius(seeds) : { symbols: seeds, files: [] };
-  const dependents = radius.symbols.filter((s) => !seeds.includes(s)).length;
-  const impactedFiles = radius.files.filter((f) => f !== target);
-
-  const moduleName = moduleOf(target);
-  const moduleNode = model.modules.find((m) => m.name === moduleName);
-  const dependentModules = [...new Set(impactedFiles.map(moduleOf))].filter((m) => m !== moduleName).sort();
-  const cycle = model.cycles.find((c) => c.includes(moduleName)) ?? [];
-
-  const confidence = moduleConfidence(moduleName, files, definedFiles);
-  const risk = scoreRisk({ file: target, module: moduleNode, blastRadius: dependents, confidence });
-  const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
-  const preservation = assessPreservation({
-    target,
-    module: moduleNode,
-    risk,
-    philosophy,
-    change,
-    isGodModule: model.godModules.some((g) => g.name === moduleName),
-  });
-
-  // Module churn (M15) → regression volatility, normalized by the mean churn of touched modules.
-  const evo = analyzeEvolution(await indexer.commitHistory(), model);
-  const moduleChurn = evo.hotspots.find((h) => h.name === moduleName)?.commits ?? 0;
-  const churned = evo.hotspots.filter((h) => h.commits > 0);
-  const churnRef = churned.length > 0 ? Math.max(1, churned.reduce((s, h) => s + h.commits, 0) / churned.length) : 1;
-
-  return simulateExecution({
-    target,
-    change,
-    moduleName,
-    risk,
-    preservation,
-    dependents,
-    impactedFiles,
-    dependentModules,
-    inCycle: cycle.length > 0,
-    cycle,
-    confidence,
-    moduleChurn,
-    churnRef,
-  });
 }
 
 /**

@@ -26,11 +26,11 @@ The spec asks for a *repository operating system*. What exists today is the
 | Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy, **+ runtime binding** (`selectAgent`/`agentBriefing` → prompt; `AgentBroker` → capability-scoped authority; `/agent --run`) | — |
 | Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | 🟡 skills = passive Markdown; pre/post hook engine now exists | Multi-phase executable skill runtime deferred (M19 note) |
 | Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate, **now wired into the loop** (blocks before any worktree) + post-write check specs | — |
-| Preservation layer (intentional vs accidental complexity) | ✅ classifier + gate (preserve/caution/allow) | Advisory; not yet a hard write-block (M14 note) |
+| Preservation layer (intentional vs accidental complexity) | ✅ classifier + **loop-internal hard gate** (preserve → block before worktree, `run --force` overrides) | — |
 | Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
 | Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
 | Risk engine (low/med/high/critical → autonomy scaling) | 🟡 blast-radius gate | No risk scoring, no test-regression probability |
-| Execution simulation (pre-apply impact prediction) | 🟡 worktree verify (post-hoc) | No pre-apply simulation |
+| Execution simulation (pre-apply impact prediction) | ✅ pre-apply dependency/type/contract/regression prediction + **hard loop gate** (M20) | Risk→PolicyEngine escalation (M13) still advisory |
 | Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
 | Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
 | Philosophy + economics + confidence layers | ⬜ | None |
@@ -92,12 +92,12 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Done (advisory slice — Policy Engine deliberately UNTOUCHED, pending its own review): `scoreRisk` (`src/cognition/risk.ts`) → low/med/high/critical from blast radius + module criticality (fan-in) + confidence (test-coverage ratio, `moduleConfidence`) + never-modify zones; coarse region from module role. `/risk <file>` (`cmdRisk`) shows level + rationale.
 - Deferred: wiring risk into the Policy Engine gate (escalate critical-region writes to `ask`) and attaching risk to every planned step — these change the safety path and are a separate milestone.
 
-#### M14 — Preservation Layer ✅ (advisory slice)
+#### M14 — Preservation Layer ✅ (now a loop-internal hard gate)
 - Goal: distinguish intentional from accidental complexity; protect project identity.
 - Build: classifier for intentional complexity vs tech debt and business-critical vs unnecessary abstraction (uses M11 philosophy + M9 criticality + M16 decisions when present). Gate that blocks "generic best-practice" rewrites of intentional structures.
 - Deps: M11, M13. Exit: a proposed refactor of an intentional abstraction is blocked with a stated reason; accidental complexity is still flagged.
 - Shipped: pure `assessPreservation` (`src/cognition/preservation.ts`) → complexity (intentional/accidental/unclear) × abstraction value (business-critical/incidental/unclear) → disposition `preserve` | `caution` | `allow`. A structure-stripping change (`simplify`/`remove-abstraction`/`rewrite`) of an intentional/business-critical structure is **preserved with a stated reason**; a never-modify zone is always preserved; a god module is treated as accidental (its complexity is the problem). `/preserve <file> [change]` (`cmdPreserve`); M21 consults it to gate every proposal.
-- Deferred: turning the `preserve` verdict into a hard write-block in the loop (advisory only — the safety path changes under its own review, like M13).
+- Done: the `preserve` verdict is now a hard pre-apply block in the cognition loop (via M20's shared `assembleSimulation` gate in `runtime.preApply`) — a structure-stripping change to an intentional/critical module aborts the run before any worktree write, overridable only with `run --force`. See M20.
 
 #### M15 — Temporal Evolution ✅
 - Goal: model the repository over time and predict architectural risk.
@@ -135,12 +135,12 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Pre-write gate now wired into the loop: `runtime.preApply` resolves the import edges the planned writes would add (M8.5 resolver + indexed edge set) and runs `evaluatePreHooks`; `CognitionLoop.run` aborts on any `block` finding **before opening a worktree** (journals `plan`→`verdict`→`decision`, nothing written) — unbypassable for every loop run (`/run`, `/agent --run`, `/refactor`), not just per-command. It can only refuse, never grant authority the broker wouldn't.
 - Deferred: the multi-phase executable skill runtime (analyze→simulate→validate→execute→rollback).
 
-#### M20 — Execution Simulation Engine 🟡 (engine shipped)
+#### M20 — Execution Simulation Engine ✅ (engine + loop-internal hard gate)
 - Goal: predict impact before applying, not only verify after.
 - Build: pre-apply simulation of dependency propagation, type-system impact, API-contract drift, test-failure probability, boundary violations. No real change without simulation validation (unless overridden).
 - Deps: M17, M19. Exit: a high-risk step shows predicted blast radius + test-failure probability before any worktree write.
 - Shipped: pure `simulateExecution` (`src/cognition/simulation.ts`) — composes M9 cycles + M13 risk/confidence + M14 preservation + M15 churn + the symbol graph's reverse-reachability into one pre-apply prediction: **dependency propagation** (downstream symbols/files/modules), **type-system impact** (downstream importers), **API-contract drift** (other modules depending on the changed surface), **boundary state** (target module in a cycle), and a **regression-probability** estimate (`hazard` = reach + criticality + volatility, scaled by test-coverage `exposure`). Yields an advisory autonomy verdict `auto` | `review` | `block` (block on never-modify / preserve; review on high risk / regression ≥ 0.6 / preservation caution / cyclic boundary). `/simulate <file> [change]` (`cmdSimulate`); the regression estimate names every factor so the prediction is auditable. No new deps.
-- Deferred: turning the verdict into a **hard pre-apply gate** on the loop's worktree write path (the M20→loop wire, alongside the deferred M13/M14 gating and the M19 pre-hook wire) — shipped as advisory, like risk/preservation, so it never silently blocks until that path is safety-reviewed.
+- Done — the verdict is now a **hard pre-apply gate** on every loop run: `runtime.preApply` runs the shared `assembleSimulation` (`src/simulation-assembly.ts`, extracted so `/simulate`, `/refactor`, and the loop produce the *same* prediction) for each planned write to an indexed file; a `block` recommendation (a change that would erase intentional/critical structure, M14) becomes a blocking `preservation` pre-hook finding, so the loop aborts **before opening a worktree**. Override is `run --force` (mirrors `/refactor --force`); the M19 structural blocks (never-modify zones, import cycles) are NOT overridable and always fire. Tighten-never-widen: the gate can only refuse, never grant. The assembly lives in the application layer (above the planes) because it composes sensing + cognition and reads tsconfig — cognition holds zero ambient fs authority.
 
 #### M21 — Autonomous Improvement (`improve` / `refactor` / migration `plan`) ✅ (`improve` + `refactor` shipped)
 - Goal: conservative evolution — better repo, preserved identity.
@@ -148,7 +148,7 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Deps: M14, M19, M20. Exit: `improve` proposes ranked, ROI-gated changes that never touch NEVER-MODIFY zones; `refactor` applies one through the simulation+hooks+worktree path.
 - Shipped: pure `proposeImprovements` (`src/cognition/improve.ts`) maps each M12 violation to a conservative, structure-preserving action (`break-cycle`, `decompose`, `realign-dependency`, `add-tests`), scores ROI = impact / effort, and ranks. Every proposal is gated through the M14 Preservation Layer (`protectedModules` in the command): a module ruled `preserve` (intentional / never-modify) is reported as **preserved, not auto-proposed**. `/improve` (`cmdImprove`). Read-only — it proposes; it never applies.
 - `refactor` shipped (`cmdRefactor`, `/refactor [--pick N] [--force]`): takes the top-ranked `improve` proposal (or `--pick N`), resolves a representative source file in the subject module, and runs it through the **M20 execution-simulation + M14 preservation pre-apply gate** (`assembleSimulation`, shared with `simulate`) — a `block` verdict refuses outright, a `review` verdict needs explicit `--force` (the human gate, constrained autonomy). If allowed, it executes under the best-fit, **capability-scoped agent** (`selectAgent` + `loop(agent)`, M18) through the same worktree transaction as every loop run, so a failing verify discards it — nothing is applied blindly. Reuses the agent broker's capability scoping for "constrained execution".
-- Deferred: the explicit engineering-economics ROI *ceiling* beyond value/effort, and turning the simulation gate into an unbypassable check inside the loop itself (it gates at the `refactor` command today; making it loop-internal is the same safety-path wire as M13/M19/M20).
+- The simulation gate is now also loop-internal (M20): `run` enforces the M14/M20 preservation block on every plan, not only `/refactor`. `/refactor` passes `force` to the loop because it already ran the same gate at the command layer (avoids a redundant double-block). Deferred: only the explicit engineering-economics ROI *ceiling* beyond value/effort.
 
 ### Phase D — Infrastructure
 
