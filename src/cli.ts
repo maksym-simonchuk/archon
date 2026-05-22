@@ -30,8 +30,8 @@ Usage:
   archon plan <goal>      Produce a plan tree — no writes               (M6)
   archon run <goal>       Plan -> act -> verify under a worktree tx     (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
-  archon status           Show task journal + budgets                   (M0)
-  archon doctor           Report runtime readiness (planner/keys/state)
+  archon status [--json]  Show task journal + budgets                   (M0)
+  archon doctor [--json]  Report runtime readiness (planner/keys/state)
   archon memory           List memory-promotion candidates              (M5)
   archon memory promote <id>   Confirm a promotion (the human gate)     (M5)
   archon plugins          List loaded plugins + capability previews     (M7)
@@ -57,6 +57,7 @@ function usageError(form: string): void {
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
+  const json = rest.includes('--json'); // machine-readable output for the report commands
   const goal = rest.join(' ').trim();
   switch (cmd) {
     case undefined:
@@ -81,9 +82,9 @@ async function main(argv: string[]): Promise<void> {
         await cmdAsk(rt, goal); // one-shot: no transcript, discard the returned text
       });
     case 'status':
-      return withRuntime(cmdStatus);
+      return withRuntime((rt) => cmdStatus(rt, { json }));
     case 'doctor':
-      return withRuntime(cmdDoctor);
+      return withRuntime((rt) => cmdDoctor(rt, { json }));
     case 'plugins':
       return withRuntime(cmdPlugins);
     case 'tool': {

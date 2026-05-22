@@ -164,18 +164,33 @@ export async function cmdIndex(rt: Runtime): Promise<void> {
   }
 }
 
-export async function cmdStatus(rt: Runtime): Promise<void> {
-  const b = rt.config.budgets;
-  console.log(
-    `profile: ${rt.config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`,
-  );
+/** Machine-readable shape of `archon status --json` (a stable automation contract). */
+export interface StatusReport {
+  profile: Profile;
+  budgets: { perTaskUsd: number; globalDailyUsd: number; contextTokensMax: number };
+  journal: { seq: number; ts: string; taskId: string; kind: string }[];
+}
 
+export async function cmdStatus(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const b = rt.config.budgets;
   // Read-only intent: don't create the db just to report an empty journal, so
   // open the real path only when it already exists (else an ephemeral one).
   const journalPath = join(rt.root, rt.config.paths.journal);
   const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
   try {
     const recent = journal.recent(15);
+    if (opts.json) {
+      const report: StatusReport = {
+        profile: rt.config.profile,
+        budgets: { perTaskUsd: b.perTaskUsd, globalDailyUsd: b.globalDailyUsd, contextTokensMax: b.contextTokensMax },
+        journal: recent.map((e) => ({ seq: e.seq, ts: e.ts, taskId: e.taskId, kind: e.kind })),
+      };
+      console.log(JSON.stringify(report, null, 2));
+      return;
+    }
+    console.log(
+      `profile: ${rt.config.profile}   budgets: $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`,
+    );
     if (recent.length === 0) {
       console.log('journal: (empty — run `archon run <goal>`)');
       return;
@@ -230,33 +245,70 @@ export async function cmdPromote(rt: Runtime, id: string): Promise<void> {
  * many plugins are loaded. Strictly read-only — it creates no db (existence is
  * probed, not opened), so running `doctor` never changes the repo.
  */
-export async function cmdDoctor(rt: Runtime): Promise<void> {
-  const { config } = rt;
-  console.log(`archon doctor — ${rt.root}`);
-  console.log(`  node:      ${process.version}`);
-  console.log(`  profile:   ${config.profile}`);
-  console.log(`  planner:   ${rt.llmPlanning ? 'llm (provider-router)' : 'deterministic (scaffold)'}`);
+/** Machine-readable shape of `archon doctor --json` (a stable automation contract). */
+export interface DoctorReport {
+  root: string;
+  node: string;
+  profile: Profile;
+  planner: 'llm' | 'deterministic';
+  providers: { id: string; supported: boolean; keyPresent: boolean }[];
+  budgets: { perTaskUsd: number; globalDailyUsd: number; contextTokensMax: number };
+  state: { index: boolean; memory: boolean; journal: boolean };
+  plugins: number;
+}
 
-  if (config.providers.length === 0) {
+export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const { config } = rt;
+  const present = (rel: string): boolean => existsSync(join(rt.root, rel));
+  const report: DoctorReport = {
+    root: rt.root,
+    node: process.version,
+    profile: config.profile,
+    planner: rt.llmPlanning ? 'llm' : 'deterministic',
+    providers: rt.providerStatus,
+    budgets: {
+      perTaskUsd: config.budgets.perTaskUsd,
+      globalDailyUsd: config.budgets.globalDailyUsd,
+      contextTokensMax: config.budgets.contextTokensMax,
+    },
+    state: {
+      index: present(config.paths.index),
+      memory: present(config.paths.memory),
+      journal: present(config.paths.journal),
+    },
+    plugins: (await rt.pluginHost()).list().length,
+  };
+
+  if (opts.json) {
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+
+  console.log(`archon doctor — ${report.root}`);
+  console.log(`  node:      ${report.node}`);
+  console.log(`  profile:   ${report.profile}`);
+  console.log(`  planner:   ${report.planner === 'llm' ? 'llm (provider-router)' : 'deterministic (scaffold)'}`);
+
+  if (report.providers.length === 0) {
     console.log('  providers: none configured → offline scaffold planner');
   } else {
     console.log('  providers:');
-    for (const p of rt.providerStatus) {
+    for (const p of report.providers) {
       const state = !p.supported ? 'unsupported (no client yet)' : p.keyPresent ? 'key present' : 'key missing';
       console.log(`    - ${p.id}: ${state}`);
     }
   }
 
-  const b = config.budgets;
+  const b = report.budgets;
   console.log(`  budgets:   $${b.perTaskUsd}/task · $${b.globalDailyUsd}/day · ${b.contextTokensMax} ctx-tok`);
 
-  const present = (rel: string): string => (existsSync(join(rt.root, rel)) ? 'present' : 'absent');
+  const mark = (ok: boolean): string => (ok ? 'present' : 'absent');
   console.log('  state:');
-  console.log(`    - index:   ${present(config.paths.index)}`);
-  console.log(`    - memory:  ${present(config.paths.memory)}`);
-  console.log(`    - journal: ${present(config.paths.journal)}`);
+  console.log(`    - index:   ${mark(report.state.index)}`);
+  console.log(`    - memory:  ${mark(report.state.memory)}`);
+  console.log(`    - journal: ${mark(report.state.journal)}`);
 
-  console.log(`  plugins:   ${(await rt.pluginHost()).list().length} loaded`);
+  console.log(`  plugins:   ${report.plugins} loaded`);
 }
 
 /**

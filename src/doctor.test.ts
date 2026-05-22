@@ -53,4 +53,19 @@ describe('archon doctor', () => {
     expect(text(log)).toContain('anthropic: key missing');
     rt.close();
   });
+
+  it('emits a single valid JSON document with --json', async () => {
+    const rt = await runtimeWith();
+    const log = captured();
+    await cmdDoctor(rt, { json: true });
+
+    const report = JSON.parse(text(log)); // throws if not exactly one JSON document
+    expect(report.planner).toBe('deterministic');
+    expect(report.providers).toEqual([]);
+    expect(report.state).toEqual({ index: false, memory: false, journal: false });
+    expect(report.plugins).toBe(0);
+    // probing existence for the JSON path must still create no db
+    expect(existsSync(join(rt.root, '.archon/index.db'))).toBe(false);
+    rt.close();
+  });
 });
