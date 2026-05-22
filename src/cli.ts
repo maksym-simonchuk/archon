@@ -7,6 +7,7 @@
 import {
   cmdAsk,
   cmdDoctor,
+  cmdImpact,
   cmdIndex,
   cmdMemory,
   cmdModel,
@@ -30,6 +31,7 @@ Usage:
   archon                  Launch the interactive shell
   archon init             Scaffold .archon/policy.yaml + config         (M0)
   archon index            Incrementally index changed files            (M1)
+  archon impact <file>    Blast radius — what a change here affects     (M1)
   archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
@@ -75,6 +77,11 @@ async function main(argv: string[]): Promise<void> {
       return cmdInit(process.cwd());
     case 'index':
       return withRuntime(cmdIndex);
+    case 'impact': {
+      const file = rest[0];
+      if (!file) return usageError('impact <file|symbol>');
+      return withRuntime((rt) => cmdImpact(rt, file));
+    }
     case 'plan': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
       const g = r.filter((a) => a !== '--json').join(' ').trim();

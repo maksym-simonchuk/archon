@@ -9,6 +9,8 @@ import type { JournalEntry, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
+import { IndexStore } from './sensing/store';
+import { SymbolGraph } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
 
 export const makeTask = (goal: string, profile: Profile): Task => ({
@@ -278,6 +280,49 @@ export async function cmdIndex(rt: Runtime): Promise<void> {
     );
   } finally {
     close();
+  }
+}
+
+/**
+ * Surface the sensing plane's blast radius: given a file (or a fully-qualified
+ * symbol id), which symbols transitively DEPEND ON it — i.e. what a change here
+ * could break. This is the same reverse-reachability the policy uses to size its
+ * ask-threshold (ADR-0005), exposed for inspection. Read-only and WASM-free: it
+ * opens the existing index directly (like `status` with the journal) and never
+ * creates it — run `archon index` first.
+ */
+export async function cmdImpact(rt: Runtime, target: string): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('impact: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const all = store.allSymbols();
+    // Accept either a file path (seed with every symbol it defines) or one symbol id.
+    const fileSeeds = all.filter((s) => s.file === target).map((s) => s.name);
+    const seeds = fileSeeds.length > 0 ? fileSeeds : all.filter((s) => s.name === target).map((s) => s.name);
+    if (seeds.length === 0) {
+      // Distinguish "indexed but symbol-less" (e.g. a types-only file — the
+      // extractor tracks functions/classes/consts) from a genuinely unknown path.
+      const indexed = store.allFileHashes().some((f) => f.path === target);
+      console.log(
+        indexed
+          ? `impact: ${target} is indexed but defines no extractable symbols (functions/classes/consts only)`
+          : `impact: "${target}" is not an indexed file or symbol (run \`archon index\` to refresh)`,
+      );
+      return;
+    }
+    const radius = await new SymbolGraph(store).blastRadius(seeds);
+    // blastRadius includes the seeds themselves; the dependents are what's at risk.
+    const downstream = radius.symbols.filter((s) => !seeds.includes(s)).length;
+    console.log(
+      `impact of ${target}: ${seeds.length} symbol(s) → ${downstream} dependent(s) across ${radius.files.length} file(s):`,
+    );
+    for (const f of radius.files) console.log(`  - ${f}${f === target ? '  (source)' : ''}`);
+  } finally {
+    store.close();
   }
 }
 
