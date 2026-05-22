@@ -53,8 +53,9 @@ synthetic models:
    host, so plugins load only when a fallback is actually needed. The router
    imports only the ABI *type*, not the host.
 
-`routingTable()` gains a `plugins: string[]` field so `archon model` shows the
-available fallback providers.
+The router exposes the granted fallback providers via `fallbackProviders()`
+(async — it consults the lazy supplier) so `archon model` lists them alongside
+the model routing, while `routingTable()` stays pure/synchronous.
 
 ## Consequences
 

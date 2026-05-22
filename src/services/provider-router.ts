@@ -1,5 +1,6 @@
 import type { ZodType } from 'zod';
 import { type Completion, type ModelSpec, type RouteRequest, type TaskClass, TASK_CLASSES } from '../core/types';
+import type { ProviderPlugin } from '../plugins/abi';
 
 /** A model in the registry plus whether a client backs it — read-only introspection. */
 export interface ModelInfo {
@@ -63,6 +64,12 @@ export interface RouterOptions {
   fallback?: string[];
   /** Spend ceiling for this router; once reached, `complete` trips the breaker. */
   budgetUsd?: number;
+  /**
+   * Lazy supplier of provider-kind plugins, tried by `complete` as a self-priced
+   * terminal fallback once no configured model serves a request. Memoized on
+   * first use, so plugins load only when actually needed. See ADR-0012.
+   */
+  providerPlugins?: () => Promise<ProviderPlugin[]>;
 }
 
 const dedupe = (xs: string[]): string[] => [...new Set(xs)];
@@ -78,6 +85,7 @@ export class ProviderRouter {
   private readonly clients: Map<string, ProviderClient>;
   private readonly cache = new Map<string, Completion>();
   private spentUsd = 0;
+  private pluginCache?: ProviderPlugin[]; // memoized provider-plugin fallback list
 
   constructor(
     registry: ModelSpec[],
@@ -117,21 +125,64 @@ export class ProviderRouter {
     const cached = this.cache.get(cacheKey);
     if (cached) return { ...cached, cached: true };
 
-    const routed = await this.route(req.taskClass, (model, client) =>
-      client
-        .complete(model, req.prompt, req.maxTokens)
-        .then((r) => ({ value: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
-    );
-    const completion: Completion = {
-      modelId: routed.modelId,
-      text: routed.value,
-      inputTokens: routed.inputTokens,
-      outputTokens: routed.outputTokens,
-      costUsd: routed.costUsd,
-      cached: false,
-    };
+    // Guard the budget up front so a blown ceiling blocks BOTH configured models
+    // and the provider-plugin fallback (ADR-0012) — never silently switch lanes.
+    this.budgetGuard();
+
+    let completion: Completion;
+    try {
+      const routed = await this.route(req.taskClass, (model, client) =>
+        client
+          .complete(model, req.prompt, req.maxTokens)
+          .then((r) => ({ value: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens })),
+      );
+      completion = {
+        modelId: routed.modelId,
+        text: routed.value,
+        inputTokens: routed.inputTokens,
+        outputTokens: routed.outputTokens,
+        costUsd: routed.costUsd,
+        cached: false,
+      };
+    } catch (modelErr) {
+      // No configured model served the request — try provider plugins as a
+      // self-priced terminal fallback. If none can, surface the model error.
+      const viaPlugin = await this.completeViaPlugin(req);
+      if (!viaPlugin) throw modelErr;
+      completion = viaPlugin;
+    }
     this.cache.set(cacheKey, completion);
     return completion;
+  }
+
+  /** Provider plugins from the supplier, loaded + memoized on first fallback. */
+  private async loadProviderPlugins(): Promise<ProviderPlugin[]> {
+    if (!this.opts.providerPlugins) return [];
+    return (this.pluginCache ??= await this.opts.providerPlugins());
+  }
+
+  /** Names of the granted provider plugins available as fallback (for `archon model`). */
+  async fallbackProviders(): Promise<string[]> {
+    return (await this.loadProviderPlugins()).map((p) => p.manifest.name);
+  }
+
+  /**
+   * Try each provider plugin in order until one returns a completion. The plugin
+   * prices itself, so its `costUsd` is added to the running spend (keeping the
+   * breaker honest); a throwing plugin is skipped. Returns null when no plugin
+   * serves the request. See ADR-0012.
+   */
+  private async completeViaPlugin(req: RouteRequest): Promise<Completion | null> {
+    for (const plugin of await this.loadProviderPlugins()) {
+      try {
+        const c = await plugin.complete(req);
+        this.spentUsd += c.costUsd;
+        return { ...c, cached: false };
+      } catch {
+        // this plugin failed — fall through to the next
+      }
+    }
+    return null;
   }
 
   /**
