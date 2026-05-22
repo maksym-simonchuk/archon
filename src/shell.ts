@@ -63,7 +63,7 @@ const SHELL_HELP = `commands:
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
-  /status          task journal + budgets
+  /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
@@ -167,7 +167,7 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       await cmdIndex(rt);
       return true;
     case '/status':
-      await cmdStatus(rt);
+      await cmdStatus(rt, { taskId: arg || undefined });
       return true;
     case '/cost':
       cmdCost(rt);

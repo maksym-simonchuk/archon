@@ -59,6 +59,39 @@ export function journalHint(e: JournalEntry): string {
   }
 }
 
+/**
+ * A fuller one-line rendering of a journal entry's payload, by kind — for the
+ * per-task replay view (`archon status <taskId>`). Richer than `journalHint`
+ * (which is only a suffix on the cross-task recent list): it unpacks the plan's
+ * steps, a diff's files, and a verdict's failing checks. Defensive against
+ * unknown payload shapes since entries are plain JSON read back from SQLite.
+ */
+export function journalDetail(e: JournalEntry): string {
+  const p = (typeof e.payload === 'object' && e.payload !== null ? e.payload : {}) as Record<string, unknown>;
+  switch (e.kind) {
+    case 'plan': {
+      const steps = Array.isArray(p.steps) ? p.steps : [];
+      const rationale = typeof p.rationale === 'string' ? p.rationale : '';
+      return steps.length ? `${rationale} — steps: ${steps.join(' · ')}` : rationale;
+    }
+    case 'step':
+      return `${p.stepId ?? '?'}  passed=${p.passed ?? '?'}`;
+    case 'diff':
+      return `${Array.isArray(p.files) ? p.files.join(', ') : ''} (+${p.added ?? 0}/-${p.removed ?? 0})`;
+    case 'verdict': {
+      const checks = Array.isArray(p.checks) ? (p.checks as { name: string; passed: boolean }[]) : [];
+      const failed = checks.filter((c) => !c.passed).map((c) => c.name);
+      return `passed=${p.passed}${failed.length ? `  failed: ${failed.join(', ')}` : ''}`;
+    }
+    case 'decision':
+      return typeof p.outcome === 'string' ? p.outcome : '';
+    case 'cost':
+      return typeof p.usd === 'number' ? `$${p.usd.toFixed(4)}` : '';
+    default:
+      return '';
+  }
+}
+
 /** One prior question/answer pair, threaded back into a later /ask for continuity. */
 export interface AskTurn {
   question: string;
@@ -229,13 +262,29 @@ export interface StatusReport {
   journal: { seq: number; ts: string; taskId: string; kind: string }[];
 }
 
-export async function cmdStatus(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+export async function cmdStatus(rt: Runtime, opts: { json?: boolean; taskId?: string } = {}): Promise<void> {
   const b = rt.config.budgets;
   // Read-only intent: don't create the db just to report an empty journal, so
   // open the real path only when it already exists (else an ephemeral one).
   const journalPath = join(rt.root, rt.config.paths.journal);
   const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
   try {
+    // Drill into one run: its full append-ordered stream (plan → steps → diffs →
+    // verdict → decision → cost), the same record used for crash-resume.
+    if (opts.taskId) {
+      const entries = await journal.replay(opts.taskId);
+      if (opts.json) {
+        console.log(JSON.stringify({ taskId: opts.taskId, entries }, null, 2));
+        return;
+      }
+      if (entries.length === 0) {
+        console.log(`task ${opts.taskId}: no journal entries (unknown task id — see \`archon status\`)`);
+        return;
+      }
+      console.log(`task ${opts.taskId}: ${entries.length} entries (in order):`);
+      for (const e of entries) console.log(`  #${e.seq} ${e.kind.padEnd(8)} ${journalDetail(e)}`);
+      return;
+    }
     const recent = journal.recent(15);
     if (opts.json) {
       const report: StatusReport = {

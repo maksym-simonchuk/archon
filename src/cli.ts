@@ -33,7 +33,7 @@ Usage:
   archon plan [--skill <name>] <goal>   Produce a plan tree — no writes (M6)
   archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
-  archon status [--json]  Show task journal + budgets                   (M0)
+  archon status [--json] [taskId]   Task journal — or one run's replay   (M0)
   archon doctor [--json]  Report runtime readiness (planner/keys/state)
   archon model            Show the provider routing table                (M7)
   archon memory           List memory-promotion candidates              (M5)
@@ -101,8 +101,10 @@ async function main(argv: string[]): Promise<void> {
           process.removeListener('SIGINT', onSigint);
         }
       });
-    case 'status':
-      return withRuntime((rt) => cmdStatus(rt, { json }));
+    case 'status': {
+      const taskId = rest.find((a) => !a.startsWith('--')); // first non-flag token = a task to replay
+      return withRuntime((rt) => cmdStatus(rt, { json, taskId }));
+    }
     case 'doctor':
       return withRuntime((rt) => cmdDoctor(rt, { json }));
     case 'model':
