@@ -19,7 +19,7 @@ The spec asks for a *repository operating system*. What exists today is the
 
 | Spec pillar | Today | Gap |
 | --- | --- | --- |
-| `ai init` deep structural analysis | 🟡 scaffolds policy/config only | No stack/monorepo/CI detection, no architectural fingerprint |
+| `ai init` deep structural analysis | ✅ stack + monorepo/workspaces + CI + framework/test-runner + style + entry points → persisted architectural fingerprint (incremental via `inputHash`) | — |
 | Architectural intelligence (boundaries, ownership, criticality) | ⬜ | Symbol graph exists; no domain/boundary model |
 | Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ⬜ | 3-tier memory store exists; nothing generates project intelligence |
 | Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
@@ -54,10 +54,11 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 
 ### Phase A — Repository Intelligence (the missing foundation)
 
-#### M8 — Structural Analyzer (`init` deep scan) ⬜
+#### M8 — Structural Analyzer (`init` deep scan) ✅
 - Goal: `archon init` performs real repository intelligence extraction, not just policy scaffolding.
 - Build: detect monorepo/polyrepo, package manager, build system, CI/CD, framework stack (frontend/backend/infra), test runner. Infer architectural style (layered / feature-sliced / modular-monolith / DDD), layering directions, entry points. Emit an **architectural fingerprint** persisted to the index DB.
 - Deps: M1 (indexer), M2 (repo-map). Exit: `init` on a real repo prints stack + style + fingerprint; re-run is incremental (no full rescan).
+- Done: `src/sensing/structural-analyzer.ts` — `analyzeStructure(root)` gathers hashable manifest+topology evidence (root/src listings, `package.json` deps/workspaces/scripts/bin/exports, lockfiles, depth-bounded nested `Cargo.toml`/`pyproject`/`go.mod`, framework configs, CI dirs) and `deriveFingerprint` emits an `ArchitecturalFingerprint`: layout (single/monorepo + workspaces), package manager (authoritative `packageManager` field → lockfile → default), languages, build system, CI, frameworks (dep-keyed), test runners (incl. `node:test`), entry points (main/module/bin/exports + conventional files), architectural style (DDD/feature-sliced/layered/modular-monolith/flat by directory vocabulary) + top directories. `cmdInit` (`src/init.ts`, `archon init` in `cli.ts`) persists it via `IndexStore.saveFingerprint`, skipping the write when `inputHash` is unchanged (incremental re-run) and printing `formatFingerprint`. The full fingerprint feeds M11 philosophy, M18 agent factory, and the M20 simulation assembly. Layering *directions* proper are delivered by M9's boundary model (fan-in/out + Martin instability over the `file_edges` graph), which builds on this fingerprint. 16 tests across `structural-analyzer.test.ts` + `init.test.ts`.
 
 #### M9 — Domain & Boundary Inference ✅
 - Goal: a living model of bounded contexts and module topology.
