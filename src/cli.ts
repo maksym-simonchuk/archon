@@ -41,7 +41,7 @@ Usage:
   archon map [--json]     Graph overview — size + most depended-on        (M1)
   archon path <a> <b>     Dependency path from symbol a to symbol b        (M1)
   archon plan [--skill <n>] [--json] <goal>   Plan tree — no writes     (M6)
-  archon run  [--skill <name>] <goal>   Plan→act→verify (worktree tx)   (M6)
+  archon run [--skill <n>] [--json] <goal>   Plan→act→verify (worktree)  (M6)
   archon ask <question>   Stream an answer; @path attaches a file       (M7)
   archon status [--json] [taskId]   Task journal — or one run's replay   (M0)
   archon doctor [--json]  Report runtime readiness (planner/keys/state)
@@ -112,9 +112,9 @@ async function main(argv: string[]): Promise<void> {
     }
     case 'run': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
-      const g = r.join(' ').trim();
-      if (!g) return usageError('run [--skill <name>] <goal>');
-      return withRuntime((rt) => cmdRun(rt, g, { skill }));
+      const g = r.filter((a) => a !== '--json').join(' ').trim();
+      if (!g) return usageError('run [--skill <name>] [--json] <goal>');
+      return withRuntime((rt) => cmdRun(rt, g, { skill, json }));
     }
     case 'ask':
       if (!goal) return usageError('ask <question>');

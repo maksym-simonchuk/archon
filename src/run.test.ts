@@ -42,4 +42,27 @@ describe('cmdRun (task framing)', () => {
     expect(out).toContain('run: discarded');
     expect(out).toMatch(/replay: archon status t-[a-z0-9]+/);
   });
+
+  it('emits a machine-readable report under --json', async () => {
+    const log = captured();
+    await cmdRun(
+      fakeRt([
+        {
+          stepId: 's1',
+          diff: { files: ['src/widget.ts'], added: 3, removed: 0, patch: '' },
+          verdict: { passed: false, checks: [{ name: 'typecheck', passed: false, output: 'boom' }] },
+        },
+      ]),
+      'add a widget',
+      { json: true },
+    );
+    const report = JSON.parse(text(log)); // stdout is exactly one JSON document
+
+    expect(report.goal).toBe('add a widget');
+    expect(report.taskId).toMatch(/^t-[a-z0-9]+$/);
+    expect(report.merged).toBe(false); // the only step failed
+    expect(report.steps).toEqual([
+      { stepId: 's1', passed: false, files: ['src/widget.ts'], failingChecks: ['typecheck'] },
+    ]);
+  });
 });

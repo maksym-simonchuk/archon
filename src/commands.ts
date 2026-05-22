@@ -260,13 +260,41 @@ export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string;
   printPlan(cog);
 }
 
-export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string } = {}): Promise<void> {
-  console.log(plannerLabel(rt.llmPlanning));
+/** Machine-readable shape of `archon run --json` (a stable automation contract). */
+export interface RunReport {
+  taskId: string;
+  goal: string;
+  /** True only if every step passed and the worktree was merged. */
+  merged: boolean;
+  steps: { stepId: string; passed: boolean; files: string[]; failingChecks: string[] }[];
+}
+
+export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string; json?: boolean } = {}): Promise<void> {
   const task = makeTask(goal, 'trusted');
+  const context = await planContext(rt, task, goal, opts.skill);
+  if (opts.json) {
+    // stdout carries only this document — planContext diagnostics go to stderr —
+    // so `archon run --json | jq .merged` is a safe CI gate.
+    const results = await rt.loop().run(task, context);
+    const report: RunReport = {
+      taskId: task.id,
+      goal,
+      merged: results.every((r) => r.verdict.passed),
+      steps: results.map((r) => ({
+        stepId: r.stepId,
+        passed: r.verdict.passed,
+        files: r.diff?.files ?? [],
+        failingChecks: r.verdict.checks.filter((c) => !c.passed).map((c) => c.name),
+      })),
+    };
+    console.log(JSON.stringify(report, null, 2));
+    return;
+  }
+  console.log(plannerLabel(rt.llmPlanning));
   // Print the id before running so it's known even if the loop throws mid-run —
   // the partial journal is still inspectable via `archon status <id>`.
   console.log(`run ${task.id}: ${goal}`);
-  printResults(await rt.loop().run(task, await planContext(rt, task, goal, opts.skill)));
+  printResults(await rt.loop().run(task, context));
   console.log(`  replay: archon status ${task.id}`);
 }
 
