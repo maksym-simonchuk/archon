@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { AgentSpec } from './cognition/agent-factory';
 import { CognitionLoop } from './cognition/loop';
+import type { ChangeKind } from './cognition/preservation';
+import { assembleSimulation } from './simulation-assembly';
 import { Executor } from './cognition/executor';
 import { Planner } from './cognition/planner';
 import { ProviderPlanner } from './cognition/provider-planner';
@@ -11,7 +13,7 @@ import { ScaffoldStrategy } from './cognition/scaffold-strategy';
 import type { PlanStrategy } from './cognition/types';
 import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
-import type { MemoryTier, Profile, Task } from './core/types';
+import type { BlastRadius, MemoryTier, Profile, Task } from './core/types';
 import { AgentBroker } from './effecting/agent-broker';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
@@ -19,13 +21,15 @@ import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/polic
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
 import { Transaction } from './effecting/transaction';
 import { MemoryStore } from './memory/store';
-import { createEmbeddingRetriever } from './plugins/builtin/embedding-retriever';
+import { embedText } from './memory/vector-index';
+import { createPersistedRetriever } from './plugins/builtin/persisted-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
 import { extractImports, resolveImport } from './sensing/import-resolver';
 import { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
+import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
 import { createAiClient } from './services/providers/ai-sdk';
@@ -99,8 +103,11 @@ export interface Runtime {
    * Full plan → act → verify → reflect loop, sharing this runtime's memory +
    * journal. With an `agent`, the executor's writes are scoped to that agent's
    * declared capabilities (M18) — it can never write more than its spec allows.
+   * `force` overrides the M14/M20 preservation pre-apply block (a structure-
+   * stripping change to an intentional/critical module); never-modify zones and
+   * import cycles (M19) still hard-block regardless. Tighten-never-widen holds.
    */
-  loop(agent?: AgentSpec): CognitionLoop;
+  loop(agent?: AgentSpec, opts?: { force?: boolean }): CognitionLoop;
   /** A built-in embedding retriever over one memory anchor, registered with the host. */
   retriever(tier: MemoryTier, key: string): Promise<RetrieverPlugin>;
   /** An incremental indexer plus its index store (caller closes the returned store). */
@@ -162,7 +169,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   let journalStore: TaskJournal | undefined;
   let core: ComputeCore | undefined;
   let host: Promise<PluginHost> | undefined;
-  const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory)));
+  // The embedder persists a content vector with every memory write, so semantic
+  // recall ranks against the stored matrix instead of re-embedding each query (M24).
+  const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory), embedText));
   const journal = (): TaskJournal => (journalStore ??= new TaskJournal(join(root, config.paths.journal)));
   const computeCore = async (): Promise<ComputeCore> => (core ??= await loadComputeCore());
 
@@ -188,7 +197,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // (guarded on memory-db existence so a dry-run `plan` opens/creates nothing).
   const memoryContext = async (task: Task): Promise<string> => {
     if (!existsSync(join(root, config.paths.memory))) return '';
-    const retriever = createEmbeddingRetriever(await computeCore(), memory(), 'episodic', task.goal);
+    const retriever = createPersistedRetriever(await computeCore(), memory(), 'episodic', task.goal);
     const hits = await retriever.retrieve(task.goal, 3);
     return hits.length ? `# Relevant prior runs for: ${task.goal}\n${hits.map((h) => `- ${h}`).join('\n')}\n` : '';
   };
@@ -262,7 +271,61 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     return evaluatePreHooks({ writes: writes.map((w) => w.target), addedImports, existingEdges });
   };
 
-  const loop = (agent?: AgentSpec): CognitionLoop =>
+  // Preservation pre-apply gate (M14/M20): the capstone that turns the advisory
+  // simulation into a real loop-internal hard block. For each planned write to an
+  // ALREADY-INDEXED source file it runs the same `assembleSimulation` the
+  // `/simulate` and `/refactor` commands use; a `block` recommendation (a change
+  // that would erase intentional/critical structure) becomes a blocking finding,
+  // so the loop aborts before opening a worktree. Like every gate it can only
+  // refuse, never grant — tighten, never widen. No index ⇒ no signal ⇒ allow.
+  const preservationFindings = async (
+    writes: { target: string; content: string }[],
+  ): Promise<PreHookFinding[]> => {
+    const indexPath = join(root, config.paths.index);
+    if (writes.length === 0 || !existsSync(indexPath)) return [];
+    const { indexer: idx, store, close } = await indexer();
+    try {
+      const findings: PreHookFinding[] = [];
+      for (const { target } of writes) {
+        // Classify the write as a `modify` — matching what `/simulate <file>`
+        // shows by default, so the gate and the inspectable prediction agree. A
+        // brand-new (unindexed) file returns null here: no structure to preserve.
+        const report = await assembleSimulation(root, idx, store, target, 'modify' satisfies ChangeKind);
+        if (report?.recommendation === 'block') {
+          findings.push({
+            hook: 'preservation',
+            severity: 'block',
+            subject: target,
+            detail: report.rationale[report.rationale.length - 1] ?? 'preservation/never-modify block',
+          });
+        }
+      }
+      return findings;
+    } finally {
+      close();
+    }
+  };
+
+  // M13: estimate the real blast radius of writing to a file by treating every
+  // symbol it defines as "changed" and taking the reverse-reachable closure over
+  // the symbol graph. This replaces the planner's safe-minimum stub (target file
+  // only) with the true transitive impact, so the broker's Policy Engine can
+  // apply the `blast_radius_files_*` rules. No index, or an unindexed/symbol-less
+  // file ⇒ undefined: the planner's stub stands and the rules stay dormant.
+  const blastRadiusFor = async (target: string): Promise<BlastRadius | undefined> => {
+    const indexPath = join(root, config.paths.index);
+    if (!existsSync(indexPath)) return undefined;
+    const store = new IndexStore(indexPath);
+    try {
+      const seeds = store.allSymbols().filter((s) => s.file === target).map((s) => s.name);
+      if (seeds.length === 0) return undefined;
+      return await new SymbolGraph(store).blastRadius(seeds);
+    } finally {
+      store.close();
+    }
+  };
+
+  const loop = (agent?: AgentSpec, opts: { force?: boolean } = {}): CognitionLoop =>
     new CognitionLoop({
       planner: planner(),
       // `trusted` so the worktree transaction's git ops are permitted; the broker
@@ -280,19 +343,26 @@ export async function buildRuntime(root: string): Promise<Runtime> {
       // needing a capability the profile won't grant stays inert rather than
       // gaining the loop's trusted authority — plugins tighten, never widen.
       verifierPlugins: async (files) => (await pluginHost()).runVerifiers(files),
-      preApply,
+      // M19 structural hooks always run (never-modify zones + import cycles are
+      // non-overridable); the M14/M20 preservation block is added unless `force`.
+      preApply: async (writes) => {
+        const structural = await preApply(writes);
+        if (opts.force) return structural;
+        return [...structural, ...(await preservationFindings(writes))];
+      },
+      blastRadiusFor,
       cost: () => router.spent,
     });
 
   const retriever = async (tier: MemoryTier, key: string): Promise<RetrieverPlugin> => {
-    const plugin = createEmbeddingRetriever(await computeCore(), memory(), tier, key);
+    const plugin = createPersistedRetriever(await computeCore(), memory(), tier, key);
     return plugin;
   };
 
   const indexer = async (): Promise<{ indexer: Indexer; store: IndexStore; close(): void }> => {
     const store = new IndexStore(join(root, config.paths.index));
     return {
-      indexer: new Indexer(await computeCore(), store, new SymbolGraph(store), root),
+      indexer: new Indexer(await computeCore(), store, new SymbolGraph(store), root, parseTsSymbols),
       store,
       close: () => store.close(),
     };

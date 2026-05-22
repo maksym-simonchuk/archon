@@ -19,7 +19,7 @@ const moduleOf = (path: string): string => {
  */
 
 export type HookSeverity = 'warn' | 'block';
-export type PreHookKind = 'never-modify' | 'forbidden-import' | 'boundary-leak';
+export type PreHookKind = 'never-modify' | 'forbidden-import' | 'boundary-leak' | 'preservation';
 
 export interface PreHookFinding {
   hook: PreHookKind;

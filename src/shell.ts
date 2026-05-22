@@ -30,10 +30,12 @@ import {
   cmdPromote,
   cmdPromotions,
   cmdRefactor,
+  cmdRecap,
   cmdRisk,
   cmdRun,
   cmdSh,
   cmdSimulate,
+  cmdSkill,
   cmdSkills,
   cmdStatus,
   cmdTool,
@@ -43,6 +45,7 @@ import {
 } from './commands';
 import type { ChangeKind } from './cognition/preservation';
 import { buildRuntime, type Runtime } from './runtime';
+import { type TreeWatcher, watchTree } from './sensing/fs-watcher';
 
 const HISTORY_FILE = 'shell_history';
 const HISTORY_MAX = 1000;
@@ -87,12 +90,14 @@ export const COMMANDS = [
   '/simulate',
   '/path',
   '/status',
+  '/recap',
   '/cost',
   '/model',
   '/doctor',
   '/memory',
   '/promote',
   '/plugins',
+  '/skill',
   '/skills',
   '/sh',
   '/policy',
@@ -104,11 +109,11 @@ export const COMMANDS = [
 
 const SHELL_HELP = `commands:
   /plan [--skill <name>] <goal>   plan a task — no writes
-  /run  [--skill <name>] <goal>   plan → act → verify under a worktree transaction
+  /run  [--skill <name>] [--force] <goal>  plan → act → verify (--force overrides the preservation gate)
   /ask <question>  stream an answer; remembers prior turns; @path attaches a file
   /clear           forget the /ask conversation context
   /index           incrementally index changed files
-  /watch [--loop|--stop]  reindex changed files + refresh health · --loop polls in the background
+  /watch [--loop|--stop]  reindex changed files + refresh health · --loop watches live (fs events) in the background
   /impact <file>   blast radius — what a change to <file> affects
   /explain <symbol>  definition + direct callers/callees (one hop)
   /map             graph overview — size + most depended-on symbols
@@ -127,12 +132,14 @@ const SHELL_HELP = `commands:
   /simulate <file> [change]  predict blast radius + regression probability before applying
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
+  /recap            per-run digest of recent activity + health trend
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
   /plugins         list loaded plugins + capability previews
+  /skill [run <name> [--pick N] [--force]]  executable multi-phase skills (analyze→simulate→validate→execute)
   /skills [name]   list skill playbooks · <name>: print one
   /sh <command>    run a command through the policy broker (gated; argv only)
   /policy [check <cmd>]  show the safety policy · check: dry-run a command
@@ -193,6 +200,7 @@ function argCandidates(head: string, words: string[]): string[] {
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
+  if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
   if ((head === '/preserve' || head === '/simulate') && words.length === 3)
@@ -281,9 +289,10 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     }
     case '/run': {
       const { value: skill, rest: r } = extractFlag(rest, '--skill');
-      const g = r.join(' ').trim();
-      if (g) await cmdRun(rt, g, { skill });
-      else console.log('usage: /run [--skill <name>] <goal>');
+      const force = r.includes('--force');
+      const g = r.filter((t) => t !== '--force').join(' ').trim();
+      if (g) await cmdRun(rt, g, { skill, force });
+      else console.log('usage: /run [--skill <name>] [--force] <goal>');
       return true;
     }
     case '/ask':
@@ -369,6 +378,18 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       else await cmdRefactor(rt, { pick: n, force: r.includes('--force') });
       return true;
     }
+    case '/skill': {
+      if (rest[0] !== 'run') {
+        await cmdSkill(rt); // bare /skill (or anything but `run`) lists the built-ins
+        return true;
+      }
+      const { value: pick, rest: r } = extractFlag(rest.slice(1), '--pick');
+      const n = pick !== undefined ? Number(pick) : undefined;
+      const name = r.find((t) => t !== '--force');
+      if (n !== undefined && (!Number.isInteger(n) || n < 0)) console.log('usage: /skill run <name> [--pick <n≥0>] [--force]');
+      else await cmdSkill(rt, name, { pick: n, force: r.includes('--force') });
+      return true;
+    }
     case '/hooks':
       await cmdHooks(rt);
       return true;
@@ -386,6 +407,9 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     }
     case '/status':
       await cmdStatus(rt, { taskId: arg || undefined });
+      return true;
+    case '/recap':
+      await cmdRecap(rt);
       return true;
     case '/cost':
       cmdCost(rt);
@@ -484,41 +508,55 @@ export async function startShell(): Promise<void> {
   // own (we register later), so rl.line/rl.cursor are already updated.
   let busy = false;
 
-  // ── /watch background poller (M22 daemon, in-process) ──────────────────────
-  // A timer that incrementally reindexes the dirty subtree and refreshes health
-  // without re-running a command. Skips a tick while a command is mid-output
-  // (reuses `busy`), unref'd so it never keeps the process alive on its own, and
-  // redraws the prompt after each tick so background output doesn't strand it.
+  // ── /watch background daemon (M22, in-process) ─────────────────────────────
+  // Incrementally reindexes the dirty subtree and refreshes health without
+  // re-running a command. Prefers a real recursive `fs.watch` (event-driven —
+  // a tick runs only when a source file actually changes); on platforms without
+  // recursive watch it falls back to a poller. A tick skips while a command is
+  // mid-output (reuses `busy`), and redraws the prompt afterwards so background
+  // output never strands it.
   const WATCH_INTERVAL_MS = 2000;
-  let watchTimer: NodeJS.Timeout | undefined;
+  let watchHandle: TreeWatcher | undefined; // event-driven watcher (preferred)
+  let watchTimer: NodeJS.Timeout | undefined; // poller fallback
+  const runWatchTick = (): void => {
+    if (busy) return; // don't interleave a tick with a running command's output
+    busy = true;
+    void cmdWatch(rt, session.watchDirty)
+      .then((next) => {
+        session.watchDirty = next;
+      })
+      .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
+      .finally(() => {
+        busy = false;
+        rl.prompt(true); // redraw the prompt beneath any tick output
+      });
+  };
   const startWatchLoop = (): void => {
-    if (watchTimer) {
+    if (watchHandle || watchTimer) {
       console.log('watch: already running — /watch --stop to stop');
       return;
     }
-    console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s — /watch --stop to stop`);
-    watchTimer = setInterval(() => {
-      if (busy) return; // don't interleave a tick with a running command's output
-      busy = true;
-      void cmdWatch(rt, session.watchDirty)
-        .then((next) => {
-          session.watchDirty = next;
-        })
-        .catch((e) => console.error(`[archon] watch: ${msg(e)}`))
-        .finally(() => {
-          busy = false;
-          rl.prompt(true); // redraw the prompt beneath any tick output
-        });
-    }, WATCH_INTERVAL_MS);
-    watchTimer.unref?.();
+    watchHandle = watchTree(rt.root, runWatchTick);
+    if (watchHandle) {
+      console.log('watch: live (fs events) — /watch --stop to stop');
+    } else {
+      console.log(`watch: polling every ${WATCH_INTERVAL_MS / 1000}s (fs events unavailable) — /watch --stop to stop`);
+      watchTimer = setInterval(runWatchTick, WATCH_INTERVAL_MS);
+      watchTimer.unref?.();
+    }
+    runWatchTick(); // an immediate first tick so the current state is reported
   };
   const stopWatchLoop = (): void => {
-    if (!watchTimer) {
+    if (!watchHandle && !watchTimer) {
       console.log('watch: not running');
       return;
     }
-    clearInterval(watchTimer);
-    watchTimer = undefined;
+    watchHandle?.close();
+    watchHandle = undefined;
+    if (watchTimer) {
+      clearInterval(watchTimer);
+      watchTimer = undefined;
+    }
     console.log('watch: stopped');
   };
   // Repaint the dimmed suggestion after the cursor, then move the cursor back to
@@ -592,7 +630,7 @@ export async function startShell(): Promise<void> {
       frame();
     }
   } finally {
-    if (watchTimer) stopWatchLoop();
+    if (watchHandle || watchTimer) stopWatchLoop();
     rl.close();
     rt.close();
     saveHistory(historyFile, history);

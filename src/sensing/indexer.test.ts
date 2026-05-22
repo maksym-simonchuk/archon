@@ -60,6 +60,23 @@ describe('Indexer', () => {
     expect(store.getFileHash('foo.ts')).toBe('h:3');
   });
 
+  it('uses the injected TS parser for TS files instead of the core heuristic', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-idx-'));
+    await writeFile(join(dir, 'foo.ts'), 'export function go() {}');
+
+    const store = new IndexStore(':memory:');
+    const graph = new SymbolGraph(store);
+    // A stub parser stands in for ts-morph; its presence must win over core.parseSymbols.
+    const indexer = new Indexer(fakeCore(), store, graph, dir, (path) => ({
+      symbols: [{ name: `${path}#go`, kind: 'function' }],
+      edges: [],
+    }));
+
+    await indexer.reindex(['foo.ts']);
+    // The injected parser's symbol id is present; the core's canned `foo` is not.
+    expect(store.allSymbols().map((s) => s.name)).toEqual(['foo.ts#go']);
+  });
+
   it('reindex records cross-file import edges for TS files', async () => {
     dir = await mkdtemp(join(tmpdir(), 'archon-idx-'));
     await writeFile(join(dir, 'a.ts'), "import { b } from './b';\nexport const a = 1;");

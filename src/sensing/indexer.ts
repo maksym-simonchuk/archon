@@ -6,9 +6,13 @@ import { realContainedPath } from '../core/path-safety';
 import { type Commit, parseGitLog } from './evolution';
 import { extractImports, resolveImport } from './import-resolver';
 import type { ComputeCore } from '../core/compute';
-import type { FileHash } from '../core/types';
+import type { FileHash, ParsedFile } from '../core/types';
 import type { IndexStore } from './store';
 import type { SymbolGraph } from './symbol-graph';
+
+/** Accurate host-side parser for one TS/JS source (M24). Injected so the Indexer
+ *  stays decoupled from ts-morph and tests can supply a stub. */
+export type TsParse = (path: string, source: string) => ParsedFile;
 
 /** File extension → tree-sitter grammar the compute core should parse with. */
 const LANGUAGE_BY_EXT: Record<string, string> = {
@@ -40,6 +44,9 @@ export class Indexer {
     private readonly store: IndexStore,
     private readonly graph: SymbolGraph,
     private readonly repoRoot: string = process.cwd(),
+    /** Accurate TS/JS parser (M24). When given, it parses TS/JS instead of the
+     *  Rust core's regex heuristic; other languages always go through the core. */
+    private readonly parseTs?: TsParse,
   ) {
     this.git = simpleGit(repoRoot);
   }
@@ -99,8 +106,15 @@ export class Indexer {
       const language: string | undefined = LANGUAGE_BY_EXT[extname(path)];
       const bytes = bytesByPath.get(path);
       if (language !== undefined && bytes !== undefined) {
-        this.graph.applyParse(path, await this.core.parseSymbols(language, path, bytes));
-        if (language === 'typescript' || language === 'javascript') {
+        const isTsJs = language === 'typescript' || language === 'javascript';
+        // TS/JS go through the accurate ts-morph parser when one is injected;
+        // every other language (and the no-parser fallback) uses the Rust core.
+        const parsed =
+          isTsJs && this.parseTs !== undefined
+            ? this.parseTs(path, new TextDecoder().decode(bytes))
+            : await this.core.parseSymbols(language, path, bytes);
+        this.graph.applyParse(path, parsed);
+        if (isTsJs) {
           this.store.replaceFileImports(path, this.resolveImports(path, bytes));
         }
       }

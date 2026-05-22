@@ -16,18 +16,20 @@ import { analyzeEvolution, type EvolutionModel, formatEvolution } from './sensin
 import { detectViolations, formatViolations, moduleConfidence, type ViolationReport } from './sensing/violations';
 import { type FileRisk, formatRisk, scoreRisk } from './cognition/risk';
 import { analyzeStructure } from './sensing/structural-analyzer';
-import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile, type PhilosophySignals } from './sensing/philosophy';
+import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile } from './sensing/philosophy';
 import { assessPreservation, type ChangeKind, formatPreservation } from './cognition/preservation';
 import { type AgentSpec, formatAgents, generateAgents } from './cognition/agent-factory';
 import { agentBriefing, selectAgent } from './cognition/agent-runtime';
-import { formatImprovements, type ImprovementAction, proposeImprovements } from './cognition/improve';
-import { formatSimulation, simulateExecution, type SimulationReport } from './cognition/simulation';
+import { formatImprovements, type Improvement, type ImprovementAction, proposeImprovements } from './cognition/improve';
+import { formatSimulation, type SimulationReport } from './cognition/simulation';
+import { type ExecutableSkill, formatSkillRun, type PhaseStep, runSkill } from './cognition/skill-runtime';
+import { assembleSimulation, fingerprintAndModel, philosophySignals } from './simulation-assembly';
 import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
-import type { Indexer } from './sensing/indexer';
 import { IndexStore } from './sensing/store';
 import { changedSince, formatWatchTick } from './sensing/watch';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
+import { formatRecap, recap } from './services/recap';
 
 export const makeTask = (goal: string, profile: Profile): Task => ({
   id: `t-${Date.now().toString(36)}`,
@@ -285,13 +287,17 @@ export interface RunReport {
   steps: { stepId: string; passed: boolean; files: string[]; failingChecks: string[] }[];
 }
 
-export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string; json?: boolean } = {}): Promise<void> {
+export async function cmdRun(
+  rt: Runtime,
+  goal: string,
+  opts: { skill?: string; json?: boolean; force?: boolean } = {},
+): Promise<void> {
   const task = makeTask(goal, 'trusted');
   const context = await planContext(rt, task, goal, opts.skill);
   if (opts.json) {
     // stdout carries only this document — planContext diagnostics go to stderr —
     // so `archon run --json | jq .merged` is a safe CI gate.
-    const results = await rt.loop().run(task, context);
+    const results = await rt.loop(undefined, { force: opts.force }).run(task, context);
     const report: RunReport = {
       taskId: task.id,
       goal,
@@ -310,7 +316,7 @@ export async function cmdRun(rt: Runtime, goal: string, opts: { skill?: string; 
   // Print the id before running so it's known even if the loop throws mid-run —
   // the partial journal is still inspectable via `archon status <id>`.
   console.log(`run ${task.id}: ${goal}`);
-  printResults(await rt.loop().run(task, context));
+  printResults(await rt.loop(undefined, { force: opts.force }).run(task, context));
   console.log(`  replay: archon status ${task.id}`);
 }
 
@@ -698,53 +704,6 @@ export async function cmdRisk(rt: Runtime, target: string, opts: { json?: boolea
 }
 
 /**
- * Gather the scalar signals the philosophy engine (M11) needs but cannot infer
- * from the index alone: typing strictness (from tsconfig), overall test ratio,
- * source-file count, and source basenames. Reads tsconfig once; tolerates JSONC.
- */
-async function philosophySignals(
-  root: string,
-  fingerprint: ArchitecturalFingerprint,
-  files: { path: string }[],
-): Promise<PhilosophySignals> {
-  const typed = fingerprint.languages.includes('typescript');
-  let strictTypes = false;
-  if (typed) {
-    const text = await readFile(join(root, 'tsconfig.json'), 'utf8').catch(() => '');
-    try {
-      const cfg = JSON.parse(text) as { compilerOptions?: { strict?: boolean } };
-      strictTypes = cfg.compilerOptions?.strict === true;
-    } catch {
-      strictTypes = /"strict"\s*:\s*true/.test(text); // tsconfig with comments
-    }
-  }
-  const isTest = (p: string): boolean => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p);
-  const isSource = (p: string): boolean => /\.[cm]?[jt]sx?$/.test(p) && !p.endsWith('.d.ts');
-  const source = files.map((f) => f.path.replace(/\\/g, '/')).filter(isSource);
-  const tests = source.filter(isTest);
-  const nonTest = source.filter((p) => !isTest(p));
-  const testRatio = nonTest.length === 0 ? 0 : Math.min(1, tests.length / nonTest.length);
-  return {
-    strictTypes,
-    typed,
-    testRatio,
-    fileCount: nonTest.length,
-    sourceBasenames: nonTest.map((p) => p.split('/').pop() ?? p),
-  };
-}
-
-/** Load fingerprint (persisted by `init`) falling back to a live structural scan, plus the boundary model. */
-async function fingerprintAndModel(
-  rt: Runtime,
-  store: IndexStore,
-): Promise<{ fingerprint: ArchitecturalFingerprint; model: BoundaryModel; files: { path: string }[] }> {
-  const files = store.allFileHashes();
-  const fingerprint = store.getFingerprint() ?? (await analyzeStructure(rt.root));
-  const model = store.loadModuleIntelligence() ?? inferBoundaries(files, store.loadFileEdges());
-  return { fingerprint, model, files };
-}
-
-/**
  * Convention & philosophy profile (M11): the project's engineering culture
  * (typing strictness, abstraction tolerance, layering, stability bias, scale,
  * naming) inferred from the fingerprint + boundary model + scalar signals.
@@ -759,7 +718,7 @@ export async function cmdPhilosophy(rt: Runtime, opts: { json?: boolean } = {}):
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const profile = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     if (opts.json) console.log(JSON.stringify(profile, null, 2));
     else console.log(formatPhilosophy(profile));
@@ -789,7 +748,7 @@ export async function cmdPreserve(
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     if (!files.some((f) => f.path === target)) {
       if (opts.json) console.log(JSON.stringify(null));
       else console.log(`preserve: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
@@ -849,7 +808,7 @@ export async function cmdAgents(rt: Runtime, opts: { json?: boolean } = {}): Pro
 
 /** Assemble the project-native agent roster from the index (shared by `agents` + `agent`). */
 async function agentRoster(rt: Runtime, store: IndexStore): Promise<AgentSpec[]> {
-  const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+  const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
   const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
   return generateAgents(fingerprint, model, philosophy);
 }
@@ -943,7 +902,7 @@ export async function cmdImprove(rt: Runtime, opts: { json?: boolean } = {}): Pr
   }
   const store = new IndexStore(indexPath);
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const report = detectViolations(buildViolationInput(store));
     const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     const definedFiles = new Set(store.allSymbols().map((s) => s.file));
@@ -985,7 +944,7 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   const { indexer, store, close } = await rt.indexer();
   let run: { agent: AgentSpec; goal: string } | undefined;
   try {
-    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
     const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
     const definedFiles = new Set(store.allSymbols().map((s) => s.file));
     const protectedSubjects = protectedModules(model, files, definedFiles, philosophy);
@@ -1017,7 +976,7 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
 
     // M20/M14 pre-apply gate — constrained autonomy: never apply a blocked change;
     // a `review` verdict needs an explicit --force.
-    const sim = await assembleSimulation(rt, indexer, store, target, CHANGE_BY_ACTION[proposal.action]);
+    const sim = await assembleSimulation(rt.root, indexer, store, target, CHANGE_BY_ACTION[proposal.action]);
     if (sim) {
       console.log(
         `  simulate(${target}): ${sim.recommendation} · regression ${Math.round(sim.regression.probability * 100)}% · blast ${sim.propagation.files} file(s)`,
@@ -1049,8 +1008,158 @@ export async function cmdRefactor(rt: Runtime, opts: { pick?: number; force?: bo
   const context = `${agentBriefing(run.agent)}\n\n${await planContext(rt, task, run.goal)}`;
   console.log(`  agent: ${run.agent.id} (${run.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)}`);
   console.log(`  run ${task.id}`);
-  printResults(await rt.loop(run.agent).run(task, context));
+  // `refactor` already ran the M14/M20 simulation gate at the command layer
+  // (block refused, review needed --force), so the loop's own preservation gate
+  // would be a redundant second block — pass force to defer to the command gate.
+  printResults(await rt.loop(run.agent, { force: true }).run(task, context));
   console.log(`  replay: archon status ${task.id}`);
+}
+
+// ── M19: executable, multi-phase skills ─────────────────────────────────────
+
+/** Mutable scratchpad threaded through a `safe-refactor` run's phases. */
+interface SafeRefactorState {
+  proposal?: Improvement;
+  target?: string;
+  agent?: AgentSpec;
+  sim?: SimulationReport | null;
+  goal?: string;
+}
+
+/**
+ * The `safe-refactor` built-in (M19): the conservative-evolution flow expressed
+ * as the standard analyze → simulate → validate → execute pipeline, sharing one
+ * scratchpad across phases. It composes the *same* primitives as `/refactor`
+ * (M21 proposals, M20 simulation, M14 preservation, M18 agents, the loop's
+ * worktree transaction) — the runtime only sequences and gates them. The loop's
+ * non-overridable forbidden-import / cycle pre-hooks still run inside `execute`,
+ * so a bad change is blocked before any write even on the `--force` path.
+ */
+function safeRefactor(rt: Runtime, opts: { pick?: number; force?: boolean }): ExecutableSkill {
+  const state: SafeRefactorState = {};
+
+  const analyze: PhaseStep = {
+    phase: 'analyze',
+    run: async () => {
+      const { store, close } = await rt.indexer();
+      try {
+        const { fingerprint, model, files } = await fingerprintAndModel(rt.root, store);
+        const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+        const definedFiles = new Set(store.allSymbols().map((s) => s.file));
+        const protectedSubjects = protectedModules(model, files, definedFiles, philosophy);
+        const { proposals } = proposeImprovements({
+          violations: detectViolations(buildViolationInput(store)).violations,
+          protectedSubjects,
+        });
+        if (proposals.length === 0) return { status: 'failed', detail: 'nothing to refactor — architecture is clean (see `improve`)' };
+        const idx = opts.pick ?? 0;
+        const proposal = proposals[idx];
+        if (!proposal) return { status: 'failed', detail: `no proposal #${idx} — ${proposals.length} available (see \`improve\`)` };
+
+        const subjectModule = proposal.subject.split(/ ↔ | → /)[0];
+        const target = files.map((f) => f.path).find((p) => moduleOf(p) === subjectModule && isSourceFile(p));
+        if (target === undefined) return { status: 'failed', detail: `can't resolve a source file for "${proposal.subject}" — index may be stale` };
+
+        const agent = selectAgent(generateAgents(fingerprint, model, philosophy), `${proposal.action} ${proposal.subject} ${target}`);
+        if (!agent) return { status: 'failed', detail: 'no agent available to execute the change' };
+
+        state.proposal = proposal;
+        state.target = target;
+        state.agent = agent;
+        state.goal = `${proposal.recommendation} (target file: ${target})`;
+        return { status: 'ok', detail: `#${idx} ${proposal.action} ${proposal.subject} (ROI ${proposal.roi}) → ${target}` };
+      } finally {
+        close();
+      }
+    },
+  };
+
+  const simulate: PhaseStep = {
+    phase: 'simulate',
+    run: async () => {
+      if (!state.target || !state.proposal) return { status: 'skipped', detail: 'no target resolved' };
+      const { indexer, store, close } = await rt.indexer();
+      try {
+        const sim = await assembleSimulation(rt.root, indexer, store, state.target, CHANGE_BY_ACTION[state.proposal.action]);
+        state.sim = sim;
+        if (!sim) return { status: 'skipped', detail: `${state.target} is unindexed — no structure to predict against` };
+        const summary = `${sim.recommendation} · regression ${Math.round(sim.regression.probability * 100)}% · blast ${sim.propagation.files} file(s)`;
+        if (sim.recommendation === 'block') return { status: 'blocked', detail: `${summary} — ${sim.rationale[0] ?? 'preservation / never-modify zone'}` };
+        return { status: 'ok', detail: summary };
+      } finally {
+        close();
+      }
+    },
+  };
+
+  const validate: PhaseStep = {
+    phase: 'validate',
+    run: async () => {
+      if (state.sim?.recommendation === 'review' && !opts.force) {
+        return { status: 'blocked', detail: 'simulation recommends review — re-run `/skill run safe-refactor --force` to apply' };
+      }
+      return { status: 'ok', detail: 'gates clear — loop will still run forbidden-import / cycle / preservation pre-hooks before any write' };
+    },
+  };
+
+  const execute: PhaseStep = {
+    phase: 'execute',
+    run: async () => {
+      if (!state.agent || !state.goal) return { status: 'failed', detail: 'no validated change to execute' };
+      const task = makeTask(state.goal, 'trusted');
+      const context = `${agentBriefing(state.agent)}\n\n${await planContext(rt, task, state.goal)}`;
+      console.log(`  agent: ${state.agent.id} (${state.agent.capabilities.join(', ')}) · ${plannerLabel(rt.llmPlanning)} · run ${task.id}`);
+      // `force` only defers the loop's *preservation* gate (already run in the
+      // simulate/validate phases); the structural forbidden-import / cycle blocks
+      // are non-overridable and still fire — blocking a bad change before write.
+      const results = await rt.loop(state.agent, { force: true }).run(task, context);
+      printResults(results);
+      const merged = results.length > 0 && results.every((r) => r.verdict.passed);
+      return merged
+        ? { status: 'ok', detail: `merged — replay: archon status ${task.id}` }
+        : { status: 'failed', detail: `verify failed — discarded (replay: archon status ${task.id})` };
+    },
+  };
+
+  return {
+    name: 'safe-refactor',
+    description: 'analyze → simulate → validate → execute the top conservative improvement, gated and reversible',
+    steps: [analyze, simulate, validate, execute],
+  };
+}
+
+/** Registry of built-in executable skills (name → description + builder). */
+const EXECUTABLE_SKILLS: Record<string, { description: string; build: (rt: Runtime, opts: { pick?: number; force?: boolean }) => ExecutableSkill }> = {
+  'safe-refactor': {
+    description: 'analyze → simulate → validate → execute the top conservative improvement, gated and reversible',
+    build: safeRefactor,
+  },
+};
+
+/**
+ * Run an executable, multi-phase skill (M19): `skill` lists the built-ins,
+ * `skill run <name>` executes its analyze → simulate → validate → execute
+ * pipeline, short-circuiting at the first gate that refuses. Each phase composes
+ * existing primitives behind the broker / loop — the skill only sequences them.
+ */
+export async function cmdSkill(rt: Runtime, name?: string, opts: { pick?: number; force?: boolean } = {}): Promise<void> {
+  if (!name) {
+    console.log('executable skills:');
+    for (const [n, s] of Object.entries(EXECUTABLE_SKILLS)) console.log(`  ${n} — ${s.description}`);
+    console.log('run one with: skill run <name> [--pick N] [--force]');
+    return;
+  }
+  const entry = EXECUTABLE_SKILLS[name];
+  if (!entry) {
+    console.log(`skill: unknown skill "${name}" — available: ${Object.keys(EXECUTABLE_SKILLS).join(', ')}`);
+    return;
+  }
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    console.log('skill: no index yet — run `archon index` first');
+    return;
+  }
+  console.log(formatSkillRun(await runSkill(entry.build(rt, opts))));
 }
 
 /**
@@ -1078,7 +1187,7 @@ export async function cmdSimulate(
   // churn signal that feeds the regression estimate's volatility term.
   const { indexer, store, close } = await rt.indexer();
   try {
-    const report = await assembleSimulation(rt, indexer, store, target, change);
+    const report = await assembleSimulation(rt.root, indexer, store, target, change);
     if (report === null) {
       if (opts.json) console.log(JSON.stringify(null));
       else console.log(`simulate: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
@@ -1089,70 +1198,6 @@ export async function cmdSimulate(
   } finally {
     close();
   }
-}
-
-/**
- * Assemble the M20 pre-apply simulation for a change to `target` (shared by
- * `simulate` and the `refactor` apply-gate). Composes M9 boundaries + M13 risk +
- * M14 preservation + M15 churn + the symbol graph into one prediction with an
- * advisory `auto`/`review`/`block` verdict. Returns null when `target` is not an
- * indexed file. Read-only.
- */
-async function assembleSimulation(
-  rt: Runtime,
-  indexer: Indexer,
-  store: IndexStore,
-  target: string,
-  change: ChangeKind,
-): Promise<SimulationReport | null> {
-  const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
-  if (!files.some((f) => f.path === target)) return null;
-
-  const all = store.allSymbols();
-  const definedFiles = new Set(all.map((s) => s.file));
-  const seeds = all.filter((s) => s.file === target).map((s) => s.name);
-  const radius = seeds.length > 0 ? await new SymbolGraph(store).blastRadius(seeds) : { symbols: seeds, files: [] };
-  const dependents = radius.symbols.filter((s) => !seeds.includes(s)).length;
-  const impactedFiles = radius.files.filter((f) => f !== target);
-
-  const moduleName = moduleOf(target);
-  const moduleNode = model.modules.find((m) => m.name === moduleName);
-  const dependentModules = [...new Set(impactedFiles.map(moduleOf))].filter((m) => m !== moduleName).sort();
-  const cycle = model.cycles.find((c) => c.includes(moduleName)) ?? [];
-
-  const confidence = moduleConfidence(moduleName, files, definedFiles);
-  const risk = scoreRisk({ file: target, module: moduleNode, blastRadius: dependents, confidence });
-  const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
-  const preservation = assessPreservation({
-    target,
-    module: moduleNode,
-    risk,
-    philosophy,
-    change,
-    isGodModule: model.godModules.some((g) => g.name === moduleName),
-  });
-
-  // Module churn (M15) → regression volatility, normalized by the mean churn of touched modules.
-  const evo = analyzeEvolution(await indexer.commitHistory(), model);
-  const moduleChurn = evo.hotspots.find((h) => h.name === moduleName)?.commits ?? 0;
-  const churned = evo.hotspots.filter((h) => h.commits > 0);
-  const churnRef = churned.length > 0 ? Math.max(1, churned.reduce((s, h) => s + h.commits, 0) / churned.length) : 1;
-
-  return simulateExecution({
-    target,
-    change,
-    moduleName,
-    risk,
-    preservation,
-    dependents,
-    impactedFiles,
-    dependentModules,
-    inCycle: cycle.length > 0,
-    cycle,
-    confidence,
-    moduleChurn,
-    churnRef,
-  });
 }
 
 /**
@@ -1383,6 +1428,31 @@ export async function cmdStatus(rt: Runtime, opts: { json?: boolean; taskId?: st
     for (const e of recent) console.log(`  #${e.seq} ${e.ts} ${e.taskId} ${e.kind}${journalHint(e)}`);
   } finally {
     journal.close();
+  }
+}
+
+/**
+ * Recap: a per-run digest of Archon's recent activity (from the task journal) +
+ * the latest architecture-health reading and its trend. Read-only — opens the
+ * journal and index only when they already exist (never creates them), like
+ * `status`/`doctor`. `--json` emits the `RecapModel` for piping.
+ */
+export async function cmdRecap(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const journalPath = join(rt.root, rt.config.paths.journal);
+  const indexPath = join(rt.root, rt.config.paths.index);
+  const journal = new TaskJournal(existsSync(journalPath) ? journalPath : ':memory:');
+  // Health history lives in the index store; absent ⇒ no trend (recap still
+  // works off the journal alone). Guarded so a recap creates no db.
+  const store = existsSync(indexPath) ? new IndexStore(indexPath) : undefined;
+  try {
+    // Scan a generous window so multi-entry runs are reconstructed whole; the
+    // formatter caps how many runs are listed.
+    const model = recap(journal.recent(200), store?.loadHealthHistory() ?? []);
+    if (opts.json) console.log(JSON.stringify(model, null, 2));
+    else console.log(formatRecap(model));
+  } finally {
+    journal.close();
+    store?.close();
   }
 }
 

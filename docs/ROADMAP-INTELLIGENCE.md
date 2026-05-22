@@ -19,31 +19,31 @@ The spec asks for a *repository operating system*. What exists today is the
 
 | Spec pillar | Today | Gap |
 | --- | --- | --- |
-| `ai init` deep structural analysis | 🟡 scaffolds policy/config only | No stack/monorepo/CI detection, no architectural fingerprint |
+| `ai init` deep structural analysis | ✅ stack + monorepo/workspaces + CI + framework/test-runner + style + entry points → persisted architectural fingerprint (incremental via `inputHash`) | — |
 | Architectural intelligence (boundaries, ownership, criticality) | ⬜ | Symbol graph exists; no domain/boundary model |
 | Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ⬜ | 3-tier memory store exists; nothing generates project intelligence |
 | Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
 | Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy, **+ runtime binding** (`selectAgent`/`agentBriefing` → prompt; `AgentBroker` → capability-scoped authority; `/agent --run`) | — |
-| Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | 🟡 skills = passive Markdown; pre/post hook engine now exists | Multi-phase executable skill runtime deferred (M19 note) |
+| Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | ✅ multi-phase skill runtime (`runSkill`) + built-in `safe-refactor` (`/skill run`); pre/post hook engine | Only one built-in shipped (`dependency-cleanup` / `architecture-review` not yet assembled) |
 | Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate, **now wired into the loop** (blocks before any worktree) + post-write check specs | — |
-| Preservation layer (intentional vs accidental complexity) | ✅ classifier + gate (preserve/caution/allow) | Advisory; not yet a hard write-block (M14 note) |
+| Preservation layer (intentional vs accidental complexity) | ✅ classifier + **loop-internal hard gate** (preserve → block before worktree, `run --force` overrides) | — |
 | Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
 | Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
-| Risk engine (low/med/high/critical → autonomy scaling) | 🟡 blast-radius gate | No risk scoring, no test-regression probability |
-| Execution simulation (pre-apply impact prediction) | 🟡 worktree verify (post-hoc) | No pre-apply simulation |
+| Risk engine (low/med/high/critical → autonomy scaling) | ✅ `scoreRisk` advisory + **live blast-radius policy gate** (real graph radius stamped on every write step → broker ask/deny) | Risk *level* not yet stamped on steps; no test-regression probability |
+| Execution simulation (pre-apply impact prediction) | ✅ pre-apply dependency/type/contract/regression prediction + **hard loop gate** (M20) | — |
 | Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
 | Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
 | Philosophy + economics + confidence layers | ⬜ | None |
 | Autonomous improvement (`ai improve`/`refactor`/migration plans) | ✅ `improve` proposes ranked, ROI-gated, preservation-safe changes; `refactor` applies one through the simulation/preservation gate + a capability-scoped agent + worktree | engineering-economics ROI *ceiling* deferred |
-| Daemon runtime (`ai watch`, FS/AST watchers) | ⬜ | Incremental indexer exists; no daemon/watcher |
-| Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | 🟡 anthropic+openai | No Gemini, no local; routing exists |
-| Rust core: tree-sitter, real vector store | 🟡 heuristic parser + `cosine_topk` | tree-sitter deferred; no persisted vector index |
+| Daemon runtime (`ai watch`, FS/AST watchers) | ✅ event-driven `fs.watch` daemon (`/watch --loop`) → debounced incremental re-index + health refresh; poller fallback | Sub-file AST-segment invalidation deferred (per-file hash-gate suffices); TUI `--loop` deferred |
+| Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | ✅ | All four wired; strength-scored routing + budget breaker + fallback (M23) |
+| Accurate parsing + real vector store | ✅ | Host-side ts-morph parser (tree-sitter unusable in wasm32); persisted memory_vectors + cosineTopK recall (M24) |
 
 **CLI coverage** (spec → status): `init` ✅(scan+memory) · `doctor` ✅(health score + evolution) ·
 `memory` ✅(list/graph/recall) · `graph` ✅(map/explain/path) · `plan` ✅ ·
 `violations` ✅ · `risk` ✅ · `evolution` ✅ · `decisions` ✅ · `improve` ✅ · `refactor` ✅(simulation-gated, agent-scoped) ·
-`boundaries` ✅ · `watch` 🟡(incremental tick + background poller) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
-`explain` 🟡(symbol≠architecture reasoning).
+`boundaries` ✅ · `watch` ✅(incremental tick + live `--loop` fs-event daemon, poller fallback) · `agents` ✅ · `agent` ✅(bind+run, capability-scoped) · `philosophy` ✅ · `preserve` ✅ · `hooks` ✅ ·
+`explain` 🟡(symbol≠architecture reasoning) · `recap` ✅(per-run journal digest + health trend) · `skill` ✅(executable multi-phase `safe-refactor`: analyze→simulate→validate→execute, gated + reversible).
 
 ---
 
@@ -54,10 +54,11 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 
 ### Phase A — Repository Intelligence (the missing foundation)
 
-#### M8 — Structural Analyzer (`init` deep scan) ⬜
+#### M8 — Structural Analyzer (`init` deep scan) ✅
 - Goal: `archon init` performs real repository intelligence extraction, not just policy scaffolding.
 - Build: detect monorepo/polyrepo, package manager, build system, CI/CD, framework stack (frontend/backend/infra), test runner. Infer architectural style (layered / feature-sliced / modular-monolith / DDD), layering directions, entry points. Emit an **architectural fingerprint** persisted to the index DB.
 - Deps: M1 (indexer), M2 (repo-map). Exit: `init` on a real repo prints stack + style + fingerprint; re-run is incremental (no full rescan).
+- Done: `src/sensing/structural-analyzer.ts` — `analyzeStructure(root)` gathers hashable manifest+topology evidence (root/src listings, `package.json` deps/workspaces/scripts/bin/exports, lockfiles, depth-bounded nested `Cargo.toml`/`pyproject`/`go.mod`, framework configs, CI dirs) and `deriveFingerprint` emits an `ArchitecturalFingerprint`: layout (single/monorepo + workspaces), package manager (authoritative `packageManager` field → lockfile → default), languages, build system, CI, frameworks (dep-keyed), test runners (incl. `node:test`), entry points (main/module/bin/exports + conventional files), architectural style (DDD/feature-sliced/layered/modular-monolith/flat by directory vocabulary) + top directories. `cmdInit` (`src/init.ts`, `archon init` in `cli.ts`) persists it via `IndexStore.saveFingerprint`, skipping the write when `inputHash` is unchanged (incremental re-run) and printing `formatFingerprint`. The full fingerprint feeds M11 philosophy, M18 agent factory, and the M20 simulation assembly. Layering *directions* proper are delivered by M9's boundary model (fan-in/out + Martin instability over the `file_edges` graph), which builds on this fingerprint. 16 tests across `structural-analyzer.test.ts` + `init.test.ts`.
 
 #### M9 — Domain & Boundary Inference ✅
 - Goal: a living model of bounded contexts and module topology.
@@ -85,19 +86,19 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Deps: M9. Exit: `violations` ranks findings by impact; `doctor` reports health score, not just readiness.
 - Done: `detectViolations` (`src/sensing/violations.ts`) emits the high-confidence detectors the substrate supports — circular deps (high), god modules (med), stable-dependency-principle violations (med), missing tests (low) — each scored severity × (1 + module criticality/fanIn) and ranked. `healthScore` = 100 − weighted penalties. `/violations` (`cmdViolations`) lists them; `doctor` now carries a `health` block (score + severity counts). Deferred (need signals not yet indexed): dead code, duplication, layering, inconsistent patterns.
 
-#### M13 — Risk + Confidence + Invariants Engine 🟡 (read-only slice)
+#### M13 — Risk + Confidence + Invariants Engine ✅ (advisory slice + blast-radius policy wire)
 - Goal: governance primitives that scale autonomy to safety.
 - Build: classify code regions (stable / evolving / experimental / deprecated) and NEVER-MODIFY zones (auth, payments, public APIs, infra). Per-module **confidence score**. **Risk scoring** (low/med/high/critical) from blast radius + criticality + confidence + test-regression probability. Wire into the Policy Engine so autonomy/approval scale with risk.
 - Deps: M9, M12. Exit: a write into a critical/low-confidence region escalates to `ask`; risk level is attached to every planned step.
 - Done (advisory slice — Policy Engine deliberately UNTOUCHED, pending its own review): `scoreRisk` (`src/cognition/risk.ts`) → low/med/high/critical from blast radius + module criticality (fan-in) + confidence (test-coverage ratio, `moduleConfidence`) + never-modify zones; coarse region from module role. `/risk <file>` (`cmdRisk`) shows level + rationale.
-- Deferred: wiring risk into the Policy Engine gate (escalate critical-region writes to `ask`) and attaching risk to every planned step — these change the safety path and are a separate milestone.
+- Done (policy wire — **no Policy Engine / broker change**, tighten-only): the cognition loop now stamps each write step with the **real graph blast radius** (`CognitionLoopDeps.blastRadiusFor` → `runtime.blastRadiusFor`: every symbol the target file defines, reverse-reachable closure via `SymbolGraph.blastRadius`). This replaces the planners' safe-minimum stub (target file only) that left the existing `blast_radius_files_exceeds: 5` ask / `blast_radius_files_max: 25` hard-limit rules dormant. A write whose true blast radius exceeds the limit is now denied at the broker → the step fails → the worktree discards. No index / unindexed file ⇒ `undefined` ⇒ the planner stub stands. The gate can only add a constraint the policy may act on, never grant authority.
 
-#### M14 — Preservation Layer ✅ (advisory slice)
+#### M14 — Preservation Layer ✅ (now a loop-internal hard gate)
 - Goal: distinguish intentional from accidental complexity; protect project identity.
 - Build: classifier for intentional complexity vs tech debt and business-critical vs unnecessary abstraction (uses M11 philosophy + M9 criticality + M16 decisions when present). Gate that blocks "generic best-practice" rewrites of intentional structures.
 - Deps: M11, M13. Exit: a proposed refactor of an intentional abstraction is blocked with a stated reason; accidental complexity is still flagged.
 - Shipped: pure `assessPreservation` (`src/cognition/preservation.ts`) → complexity (intentional/accidental/unclear) × abstraction value (business-critical/incidental/unclear) → disposition `preserve` | `caution` | `allow`. A structure-stripping change (`simplify`/`remove-abstraction`/`rewrite`) of an intentional/business-critical structure is **preserved with a stated reason**; a never-modify zone is always preserved; a god module is treated as accidental (its complexity is the problem). `/preserve <file> [change]` (`cmdPreserve`); M21 consults it to gate every proposal.
-- Deferred: turning the `preserve` verdict into a hard write-block in the loop (advisory only — the safety path changes under its own review, like M13).
+- Done: the `preserve` verdict is now a hard pre-apply block in the cognition loop (via M20's shared `assembleSimulation` gate in `runtime.preApply`) — a structure-stripping change to an intentional/critical module aborts the run before any worktree write, overridable only with `run --force`. See M20.
 
 #### M15 — Temporal Evolution ✅
 - Goal: model the repository over time and predict architectural risk.
@@ -127,20 +128,20 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Shipped: pure `generateAgents` (`src/cognition/agent-factory.ts`) → framework agents (`nextjs-routing-agent`, `state-management-agent`, `api-contract-agent`), structural agents (`architecture-review-agent` always; `feature-boundary-enforcer` for sliced/DDD; `dependency-cleanup-agent` when cycles/god-modules exist), stack agents (`testing-agent`). Each `AgentSpec` carries triggers, rules, module scope, broker capabilities, and a risk-escalation ceiling; ids are de-duplicated and order-stable. `/agents` (`cmdAgents`). No new deps.
 - Runtime binding shipped: `src/cognition/agent-runtime.ts` — `selectAgent(agents, goal)` (pure fit-score over id/trigger/scope/rule overlap; falls back to the read-only `architecture-review-agent`) + `agentBriefing(spec)` (renders the mandate as a planner preamble → **spec→prompt**). `effecting/agent-broker.ts` `AgentBroker` extends the CapabilityBroker and overrides the single `request` gate to **deny any action outside the spec's capabilities before policy** (tighten-never-widen, ADR-0003) → **spec→authority**. `runtime.loop(agent?)` runs the executor under that scoped broker (transaction/verifier stay trusted). `/agent [--run] <goal>` (`cmdAgentRun`): selects the agent, plans under its briefing, and with `--run` executes through the capability-scoped loop — a read-only agent plans but its writes are denied, so the worktree discards.
 
-#### M19 — Autoskills v2 + Hooks Engine 🟡 (hooks engine shipped)
+#### M19 — Autoskills v2 + Hooks Engine ✅ (hooks engine + multi-phase skill runtime)
 - Goal: skills become executable, multi-phase, gated workflows.
 - Build: skill runtime with phases analyze → simulate → validate → execute → rollback (e.g. `safe-refactor`, `dependency-cleanup`, `architecture-review`). Hooks engine enforcing pre (forbidden-import, boundary, dependency-constraint) and post (lint, typecheck, test, regression, bundle) checks via the broker.
 - Deps: M13, M14. Exit: `safe-refactor` runs all phases; a forbidden-import pre-hook blocks a bad change before write.
 - Shipped: pure `evaluatePreHooks` (`src/effecting/hooks.ts`) — the static pre-write gate: **never-modify** (write into a sensitive zone → block), **forbidden-import** (an added edge that closes a module cycle → block, via reachability over the existing module graph), **boundary-leak** (cross-module import past the public surface → warn). `postHookChecks(fingerprint)` derives the post-write checks the stack implies (typecheck + the detected test runner). `/hooks` (`cmdHooks`) introspects both. `effecting` stays self-contained (inlined `moduleOf`, no sensing import).
 - Pre-write gate now wired into the loop: `runtime.preApply` resolves the import edges the planned writes would add (M8.5 resolver + indexed edge set) and runs `evaluatePreHooks`; `CognitionLoop.run` aborts on any `block` finding **before opening a worktree** (journals `plan`→`verdict`→`decision`, nothing written) — unbypassable for every loop run (`/run`, `/agent --run`, `/refactor`), not just per-command. It can only refuse, never grant authority the broker wouldn't.
-- Deferred: the multi-phase executable skill runtime (analyze→simulate→validate→execute→rollback).
+- Shipped (skill runtime): pure `runSkill` / `formatSkillRun` (`src/cognition/skill-runtime.ts`) — sequences an `ExecutableSkill`'s declared phases (analyze → simulate → validate → execute) with gate semantics: a `blocked`/`failed` pre-execute phase short-circuits (nothing downstream runs, no worktree opened), a failed `execute` synthesises a `rollback` outcome (the loop's transaction already discarded the worktree). Plane-pure: it imports only types and composes injected closures, holding zero effect authority. The built-in `safe-refactor` (assembled in `commands.ts` from the *same* primitives as `/refactor`: M21 `proposeImprovements` + preservation-protected subjects → M20 `assembleSimulation` → the `review`/`--force` gate → the M18 capability-scoped agent through the loop's worktree transaction) runs all five phases. `/skill` lists built-ins; `/skill run safe-refactor [--pick N] [--force]` executes the pipeline. Exit met: the run halts at `simulate` on a `block` recommendation, and during `execute` the loop's **non-overridable** forbidden-import / cycle pre-hooks still fire (`--force` defers only the preservation gate already run in earlier phases) — so a bad change is blocked before any write.
 
-#### M20 — Execution Simulation Engine 🟡 (engine shipped)
+#### M20 — Execution Simulation Engine ✅ (engine + loop-internal hard gate)
 - Goal: predict impact before applying, not only verify after.
 - Build: pre-apply simulation of dependency propagation, type-system impact, API-contract drift, test-failure probability, boundary violations. No real change without simulation validation (unless overridden).
 - Deps: M17, M19. Exit: a high-risk step shows predicted blast radius + test-failure probability before any worktree write.
 - Shipped: pure `simulateExecution` (`src/cognition/simulation.ts`) — composes M9 cycles + M13 risk/confidence + M14 preservation + M15 churn + the symbol graph's reverse-reachability into one pre-apply prediction: **dependency propagation** (downstream symbols/files/modules), **type-system impact** (downstream importers), **API-contract drift** (other modules depending on the changed surface), **boundary state** (target module in a cycle), and a **regression-probability** estimate (`hazard` = reach + criticality + volatility, scaled by test-coverage `exposure`). Yields an advisory autonomy verdict `auto` | `review` | `block` (block on never-modify / preserve; review on high risk / regression ≥ 0.6 / preservation caution / cyclic boundary). `/simulate <file> [change]` (`cmdSimulate`); the regression estimate names every factor so the prediction is auditable. No new deps.
-- Deferred: turning the verdict into a **hard pre-apply gate** on the loop's worktree write path (the M20→loop wire, alongside the deferred M13/M14 gating and the M19 pre-hook wire) — shipped as advisory, like risk/preservation, so it never silently blocks until that path is safety-reviewed.
+- Done — the verdict is now a **hard pre-apply gate** on every loop run: `runtime.preApply` runs the shared `assembleSimulation` (`src/simulation-assembly.ts`, extracted so `/simulate`, `/refactor`, and the loop produce the *same* prediction) for each planned write to an indexed file; a `block` recommendation (a change that would erase intentional/critical structure, M14) becomes a blocking `preservation` pre-hook finding, so the loop aborts **before opening a worktree**. Override is `run --force` (mirrors `/refactor --force`); the M19 structural blocks (never-modify zones, import cycles) are NOT overridable and always fire. Tighten-never-widen: the gate can only refuse, never grant. The assembly lives in the application layer (above the planes) because it composes sensing + cognition and reads tsconfig — cognition holds zero ambient fs authority.
 
 #### M21 — Autonomous Improvement (`improve` / `refactor` / migration `plan`) ✅ (`improve` + `refactor` shipped)
 - Goal: conservative evolution — better repo, preserved identity.
@@ -148,26 +149,30 @@ order is a DAG, not a straight line. Grouped into 4 phases.
 - Deps: M14, M19, M20. Exit: `improve` proposes ranked, ROI-gated changes that never touch NEVER-MODIFY zones; `refactor` applies one through the simulation+hooks+worktree path.
 - Shipped: pure `proposeImprovements` (`src/cognition/improve.ts`) maps each M12 violation to a conservative, structure-preserving action (`break-cycle`, `decompose`, `realign-dependency`, `add-tests`), scores ROI = impact / effort, and ranks. Every proposal is gated through the M14 Preservation Layer (`protectedModules` in the command): a module ruled `preserve` (intentional / never-modify) is reported as **preserved, not auto-proposed**. `/improve` (`cmdImprove`). Read-only — it proposes; it never applies.
 - `refactor` shipped (`cmdRefactor`, `/refactor [--pick N] [--force]`): takes the top-ranked `improve` proposal (or `--pick N`), resolves a representative source file in the subject module, and runs it through the **M20 execution-simulation + M14 preservation pre-apply gate** (`assembleSimulation`, shared with `simulate`) — a `block` verdict refuses outright, a `review` verdict needs explicit `--force` (the human gate, constrained autonomy). If allowed, it executes under the best-fit, **capability-scoped agent** (`selectAgent` + `loop(agent)`, M18) through the same worktree transaction as every loop run, so a failing verify discards it — nothing is applied blindly. Reuses the agent broker's capability scoping for "constrained execution".
-- Deferred: the explicit engineering-economics ROI *ceiling* beyond value/effort, and turning the simulation gate into an unbypassable check inside the loop itself (it gates at the `refactor` command today; making it loop-internal is the same safety-path wire as M13/M19/M20).
+- The simulation gate is now also loop-internal (M20): `run` enforces the M14/M20 preservation block on every plan, not only `/refactor`. `/refactor` passes `force` to the loop because it already ran the same gate at the command layer (avoids a redundant double-block). Deferred: only the explicit engineering-economics ROI *ceiling* beyond value/effort.
 
 ### Phase D — Infrastructure
 
-#### M22 — Daemon Runtime (`watch`) 🟡 (in-process poller shipped)
+#### M22 — Daemon Runtime (`watch`) ✅ (FS-event watcher + incremental tick)
 - Goal: continuous intelligence without re-running commands.
 - Build: `archon watch` daemon — FS watcher → git-diff/AST-aware incremental re-index of only the affected graph segment; symbol-level cache; background low-cost analysis.
 - Deps: M8, M12. Exit: editing one file re-indexes only its subtree live; violations refresh in the background.
-- Shipped: pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand; `/watch --loop` starts an unref'd in-process background poller (2s) in the line shell that reindexes + refreshes health without re-running a command, `/watch --stop` ends it. `dirtyPaths` now degrades to `[]` outside a git repo, like `commitHistory`.
-- Deferred: a real FS-event watcher (vs git-status polling), AST-segment-level invalidation, and `--loop` inside the full-screen TUI render loop (the line shell carries the daemon for now; the TUI gets the single-tick `/watch`).
+- Shipped (tick): pure `src/sensing/watch.ts` — `changedSince(prev, curr)` diffs consecutive dirty snapshots (entered/left/quiet) and `formatWatchTick` renders the one-line delta. `cmdWatch(rt, prev)` runs one incremental tick: reindex the git-dirty set (hash-gated by the Indexer, so only content-changed files reparse — never a full rescan), and when the set moved, recompute the M12 health score and print. `/watch` runs a single tick on demand. `dirtyPaths` degrades to `[]` outside a git repo, like `commitHistory`.
+- Shipped (FS-event watcher): `src/sensing/fs-watcher.ts` — zero-dep, built on Node's native recursive `fs.watch`. `isWatchable` filters events to JS/TS source files outside noise dirs (node_modules/.git/dist/.archon/…); `ChangeBatcher` debounces a burst of edits into one sorted, deduplicated batch (injectable timer → unit-tested with a manual clock, no real FS/clock); `watchTree(root, onBatch)` wires `fs.watch` into the batcher and returns a stop handle, or `undefined` where recursive watch is unsupported. `/watch --loop` now runs **event-driven** — a tick fires only when a source file actually changes (no 2s polling) — and falls back to the interval poller when `watchTree` returns `undefined`; `/watch --stop` ends it. Like the Indexer, the watcher is a Sensing-plane reader: it only observes, so it reads `fs` directly (the effecting-isolation invariant scans cognition/effecting, not sensing).
+- Deferred (non-blocking): sub-file AST-segment-level invalidation (the Indexer already hash-gates per file, so a changed file fully reparses — fast for the small files here) and `--loop` inside the full-screen TUI render loop (the line shell carries the live daemon; the TUI keeps the single-tick `/watch`).
 
-#### M23 — Provider Orchestration completion ⬜
+#### M23 — Provider Orchestration completion ✅
 - Goal: route each task to the provider that fits it.
 - Build: add Gemini + local-model provider clients; task-based routing (Claude → architecture reasoning / deep context, OpenAI → structured tool execution, Gemini → large-repo ingestion, local → cheap background analysis).
 - Deps: M7. Exit: a large-ingestion task routes to Gemini, a background scan to a local model, with fallback.
+- Done: `@ai-sdk/google` added; `createAiClient` now covers `anthropic | openai | google | local` — Gemini via the Google generative-language endpoint, `local` reusing the OpenAI chat protocol against a configurable base URL (`ARCHON_LOCAL_BASE_URL`, default `http://localhost:11434/v1`, keyless). Catalog gains `gemini-2.0-flash` (1M ctx) + `gemini-1.5-pro` (2M ctx); `local` model ids are user-named and synthesized free (cost 0). Runtime `PROVIDER_ENV`/`KEYLESS_PROVIDERS`/`providerStatus` updated; the router's existing strength-scored selection + budget breaker + fallback chain now spans all four. Tests inject `fetch` — no real network (Gemini-endpoint + local-baseURL routing asserted; `resolveModels` catalog + local-synthesis covered).
 
-#### M24 — Rust core: tree-sitter + vector store ⬜
+#### M24 — Accurate parsing + persisted vector store ✅
 - Goal: production-grade parsing + semantic memory.
 - Build: replace the heuristic symbol extractor with tree-sitter (or ts-morph for TS) for accurate symbol/dependency graphs; persist a vector index for semantic memory/retrieval.
 - Deps: M1. Exit: symbol graph matches a tree-sitter parse; semantic recall uses the persisted vector index.
+- Done (parsing): TS/JS now parse through `src/sensing/ts-parser.ts` (ts-morph / TypeScript compiler API) rather than the Rust regex heuristic — declarations are found structurally (functions, classes + methods, interfaces, type aliases, enums, arrow-const bindings) and `calls` edges connect real call sites to the *nearest enclosing* declaration, eliminating the heuristic's false positives (keywords, string contents) and misses (methods). tree-sitter stays unusable in wasm32 (ADR-0011), so the accurate parser lives host-side; the Indexer takes it as an injected `parseTs` and falls back to the Rust core for non-TS languages. One-hop graph (defines/calls/imports) is unchanged in shape, so blast-radius/neighbors/hotNodes all consume it as-is.
+- Done (vectors): `src/memory/vector-index.ts` adds a deterministic, L2-normalized hashing-trick embedding (FNV-1a, same family as the core's `embed_topk`, reimplemented in TS so persisted vectors don't depend on the WASM build). `MemoryStore` takes an optional embedder and persists a `memory_vectors(id, vec BLOB)` row on every write, drops it on eviction, and exposes `recallVectors`. The new `persisted-retriever` ranks a query against the *stored* matrix via the core's `cosineTopK` — recall cost no longer scales with document length. Runtime wires the embedder into the shared store and swaps `memoryContext` + `retriever()` onto the persisted path. (`embedding-retriever` is retained as the re-embed-on-query ABI demo.)
 
 ---
 
@@ -182,7 +187,7 @@ Not all 17 milestones are needed to demonstrate the thesis. Suggested cut:
   + M13 → M14 → M17. Risk-scaled autonomy + preservation + intent-scoped context.
 - **Autonomy MVP** (proves "conservative evolution"): + M19 → M21. One real
   `safe-refactor` / `improve` flow end-to-end.
-- **Production**: M11, M15, M16, M18, M20, M22, M23, M24 — depth, prediction,
+- **Production**: M11, M15, M16, M18, M20, M22 — depth, prediction,
   generated agents, daemon, full provider mesh, accurate parsing.
 
 ## 4. Critical path

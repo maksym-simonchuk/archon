@@ -76,6 +76,17 @@ describe('shell dispatch', () => {
     }
   });
 
+  it('/recap reports no runs before anything is journaled', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/recap')).toBe(true);
+      expect(text(log)).toContain('no runs journaled yet');
+    } finally {
+      rt.close();
+    }
+  });
+
   it('/boundaries reports no index before one is built', async () => {
     const rt = await runtime();
     const log = captured();
@@ -147,6 +158,41 @@ describe('shell dispatch', () => {
       expect(out).toContain('watch:');
       expect(out).toContain('health');
       expect(session.watchDirty.has('a.ts')).toBe(true);
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/skill lists the built-in executable skills', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill')).toBe(true);
+      const out = text(log);
+      expect(out).toContain('executable skills:');
+      expect(out).toContain('safe-refactor');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/skill run reports no index before one is built', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill run safe-refactor')).toBe(true);
+      expect(text(log)).toContain('no index yet');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('/skill run rejects an unknown skill name', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      expect(await dispatch(rt, '/skill run nope')).toBe(true);
+      expect(text(log)).toContain('unknown skill');
     } finally {
       rt.close();
     }
@@ -273,8 +319,8 @@ describe('shell conversational /ask', () => {
 describe('shell tab-completion', () => {
   it('completes a slash-command prefix to its matches', () => {
     expect(completeShell('/pl')).toEqual([['/plan', '/plugins'], '/pl']);
-    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skills', '/sh'], '/s']);
-    expect(completeShell('/sk')).toEqual([['/skills'], '/sk']);
+    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skill', '/skills', '/sh'], '/s']);
+    expect(completeShell('/sk')).toEqual([['/skill', '/skills'], '/sk']);
     expect(completeShell('/sh')).toEqual([['/sh'], '/sh']);
   });
 

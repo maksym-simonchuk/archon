@@ -1,5 +1,16 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { MemoryRecord, MemoryTier } from '../core/types';
+import { packVector, unpackVector } from './vector-index';
+
+/** A recalled record paired with its persisted embedding (M24 semantic recall). */
+export interface VectorRecord {
+  content: string;
+  vector: Float32Array;
+}
+
+/** Computes an embedding for a record's content. Injected so the store stays
+ *  decoupled from the embedding algorithm (and tests can omit it entirely). */
+export type Embedder = (text: string) => Float32Array;
 
 const TIER_ORDER: MemoryTier[] = ['episodic', 'semantic', 'procedural'];
 
@@ -31,7 +42,12 @@ export interface MemoryWriteOptions {
 export class MemoryStore {
   private readonly db: DatabaseSync;
 
-  constructor(location: string) {
+  /** When provided, each `write` persists an embedding of the record's content,
+   *  enabling persisted-vector semantic recall (`recallVectors`). */
+  constructor(
+    location: string,
+    private readonly embed?: Embedder,
+  ) {
     this.db = new DatabaseSync(location);
     if (location !== ':memory:') this.db.exec('PRAGMA journal_mode = WAL;');
     this.migrate();
@@ -52,6 +68,10 @@ export class MemoryStore {
         last_access TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_memory_tier_key ON memory(tier, key);
+      CREATE TABLE IF NOT EXISTS memory_vectors (
+        id  TEXT PRIMARY KEY,
+        vec BLOB NOT NULL
+      );
     `);
   }
 
@@ -75,6 +95,35 @@ export class MemoryStore {
         opts.pinned ? 1 : 0,
         record.createdAt,
       );
+    // Persist the content embedding for semantic recall. Re-embedding on every
+    // write keeps the vector in lock-step with the (possibly edited) content.
+    if (this.embed !== undefined) {
+      this.db
+        .prepare('INSERT INTO memory_vectors (id, vec) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET vec = excluded.vec')
+        .run(record.id, packVector(this.embed(record.content)));
+    }
+  }
+
+  /**
+   * Recall records for a tier+key paired with their persisted embeddings — the
+   * substrate for vector semantic recall (M24). Like {@link recall} it counts as
+   * an access (bumps frequency). Records written before an embedder was attached
+   * have no vector and are omitted (they remain reachable via plain `recall`).
+   */
+  recallVectors(tier: MemoryTier, key: string): VectorRecord[] {
+    const now = new Date().toISOString();
+    this.db
+      .prepare('UPDATE memory SET freq = freq + 1, last_access = ? WHERE tier = ? AND key = ?')
+      .run(now, tier, key);
+    const rows = this.db
+      .prepare(
+        `SELECT m.content AS content, v.vec AS vec FROM memory m
+         JOIN memory_vectors v ON v.id = m.id
+         WHERE m.tier = ? AND m.key = ?
+         ORDER BY m.pinned DESC, m.freq DESC, m.last_access DESC`,
+      )
+      .all(tier, key) as Array<{ content: string; vec: Uint8Array }>;
+    return rows.map((r) => ({ content: r.content, vector: unpackVector(r.vec) }));
   }
 
   /**
@@ -159,7 +208,11 @@ export class MemoryStore {
       .all(tier) as Array<{ id: string }>;
     const doomed = rows.slice(keep);
     const del = this.db.prepare('DELETE FROM memory WHERE id = ?');
-    for (const r of doomed) del.run(r.id);
+    const delVec = this.db.prepare('DELETE FROM memory_vectors WHERE id = ?');
+    for (const r of doomed) {
+      del.run(r.id);
+      delVec.run(r.id); // keep the vector index in step with eviction
+    }
     return doomed.length;
   }
 
