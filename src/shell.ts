@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { createInterface, moveCursor } from 'node:readline';
 import {
   type AskTurn,
+  cmdAgents,
   cmdAsk,
   cmdBoundaries,
   cmdCost,
@@ -10,7 +11,9 @@ import {
   cmdDoctor,
   cmdEvolution,
   cmdExplain,
+  cmdHooks,
   cmdImpact,
+  cmdImprove,
   cmdIndex,
   cmdMap,
   cmdMemory,
@@ -18,20 +21,24 @@ import {
   cmdMemoryList,
   cmdModel,
   cmdPath,
+  cmdPhilosophy,
   cmdPlan,
   cmdPlugins,
   cmdPolicy,
+  cmdPreserve,
   cmdPromote,
   cmdPromotions,
   cmdRisk,
   cmdRun,
   cmdSh,
+  cmdSimulate,
   cmdSkills,
   cmdStatus,
   cmdTool,
   cmdViolations,
   extractFlag,
 } from './commands';
+import type { ChangeKind } from './cognition/preservation';
 import { buildRuntime, type Runtime } from './runtime';
 
 const HISTORY_FILE = 'shell_history';
@@ -49,8 +56,8 @@ export interface ShellSession {
 }
 export const newSession = (): ShellSession => ({ askHistory: [] });
 
-/** Every slash command the shell understands — drives tab-completion. */
-const COMMANDS = [
+/** Every slash command the shell understands — drives tab-completion (and the TUI slash menu). */
+export const COMMANDS = [
   '/plan',
   '/run',
   '/ask',
@@ -64,6 +71,12 @@ const COMMANDS = [
   '/risk',
   '/evolution',
   '/decisions',
+  '/philosophy',
+  '/preserve',
+  '/agents',
+  '/improve',
+  '/hooks',
+  '/simulate',
   '/path',
   '/status',
   '/cost',
@@ -95,6 +108,12 @@ const SHELL_HELP = `commands:
   /risk <file>     change-risk level for a file (blast × criticality × confidence)
   /evolution       churn × coupling over git history — modules trending toward god-object
   /decisions [query|propose]  ADR decision memory · propose: draft an ADR for the latest change
+  /philosophy      inferred engineering culture (typing, abstraction, bias, scale)
+  /preserve <file> [change]  would a change erase intentional/critical structure?
+  /agents          project-native agents the stack + topology imply
+  /improve         conservative, ROI-ranked, preservation-gated improvement proposals
+  /hooks           pre-write gate (forbidden-import/boundary/never-modify) + post-write checks
+  /simulate <file> [change]  predict blast radius + regression probability before applying
   /path <a> <b>    shortest dependency chain from symbol a to symbol b
   /status [taskId] task journal · <taskId>: that run's full replay
   /cost            session spend vs the per-task budget
@@ -142,6 +161,12 @@ function statusLine(rt: Runtime): string {
 /** Memory tiers offered after `/memory list ` — mirrors MEMORY_TIERS in commands.ts. */
 const MEMORY_COMPLETION_TIERS = ['episodic', 'semantic', 'procedural'] as const;
 
+/** Change kinds accepted by `/preserve` — mirrors ChangeKind in cognition/preservation. */
+const CHANGE_KINDS = ['modify', 'simplify', 'remove-abstraction', 'rewrite', 'extract'] as const;
+/** Coerce a user token to a ChangeKind; `/preserve` defaults to the structure-stripping case, `/simulate` to a plain modify. */
+const asChangeKind = (s: string | undefined, fallback: ChangeKind = 'remove-abstraction'): ChangeKind =>
+  (CHANGE_KINDS as readonly string[]).includes(s ?? '') ? (s as ChangeKind) : fallback;
+
 /**
  * Static argument completions for the few commands with a fixed subcommand
  * vocabulary. Returns the full candidate *lines* (so readline can append the
@@ -157,6 +182,8 @@ function argCandidates(head: string, words: string[]): string[] {
   }
   if (head === '/policy' && words.length === 2) return ['/policy check'];
   if (head === '/decisions' && words.length === 2) return ['/decisions propose'];
+  if ((head === '/preserve' || head === '/simulate') && words.length === 3)
+    return CHANGE_KINDS.map((k) => `${head} ${words[1]} ${k}`);
   return [];
 }
 
@@ -294,6 +321,30 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/decisions':
       await cmdDecisions(rt, arg);
       return true;
+    case '/philosophy':
+      await cmdPhilosophy(rt);
+      return true;
+    case '/preserve': {
+      const [file, kind] = rest;
+      if (!file) console.log(`usage: /preserve <file> [${CHANGE_KINDS.join('|')}]`);
+      else await cmdPreserve(rt, file, asChangeKind(kind));
+      return true;
+    }
+    case '/agents':
+      await cmdAgents(rt);
+      return true;
+    case '/improve':
+      await cmdImprove(rt);
+      return true;
+    case '/hooks':
+      await cmdHooks(rt);
+      return true;
+    case '/simulate': {
+      const [file, kind] = rest;
+      if (!file) console.log(`usage: /simulate <file> [${CHANGE_KINDS.join('|')}]`);
+      else await cmdSimulate(rt, file, asChangeKind(kind, 'modify'));
+      return true;
+    }
     case '/path': {
       const [from, to] = rest;
       if (from && to) await cmdPath(rt, from, to);

@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join, posix } from 'node:path';
 import type { CognitivePlan } from './cognition/types';
-import type { JournalEntry, MemoryTier, PolicyDecision, Profile, StepResult, Task } from './core/types';
+import type { ArchitecturalFingerprint, JournalEntry, MemoryTier, PolicyDecision, Profile, StepResult, Task } from './core/types';
 import { PromotionEngine } from './memory/promotion';
 import type { SkillPlugin } from './plugins/abi';
 import type { Runtime } from './runtime';
@@ -15,6 +15,13 @@ import { assessSignificance, type Decision, formatDecisions, matchesQuery, parse
 import { analyzeEvolution, type EvolutionModel, formatEvolution } from './sensing/evolution';
 import { detectViolations, formatViolations, moduleConfidence, type ViolationReport } from './sensing/violations';
 import { type FileRisk, formatRisk, scoreRisk } from './cognition/risk';
+import { analyzeStructure } from './sensing/structural-analyzer';
+import { formatPhilosophy, inferPhilosophy, type PhilosophyProfile, type PhilosophySignals } from './sensing/philosophy';
+import { assessPreservation, type ChangeKind, formatPreservation } from './cognition/preservation';
+import { formatAgents, generateAgents } from './cognition/agent-factory';
+import { formatImprovements, proposeImprovements } from './cognition/improve';
+import { formatSimulation, simulateExecution } from './cognition/simulation';
+import { evaluatePreHooks, formatHooks, postHookChecks } from './effecting/hooks';
 import { IndexStore } from './sensing/store';
 import { SymbolGraph, type SymbolNeighbors } from './sensing/symbol-graph';
 import { TaskJournal } from './services/task-journal';
@@ -660,6 +667,327 @@ export async function cmdRisk(rt: Runtime, target: string, opts: { json?: boolea
   } finally {
     store.close();
   }
+}
+
+/**
+ * Gather the scalar signals the philosophy engine (M11) needs but cannot infer
+ * from the index alone: typing strictness (from tsconfig), overall test ratio,
+ * source-file count, and source basenames. Reads tsconfig once; tolerates JSONC.
+ */
+async function philosophySignals(
+  root: string,
+  fingerprint: ArchitecturalFingerprint,
+  files: { path: string }[],
+): Promise<PhilosophySignals> {
+  const typed = fingerprint.languages.includes('typescript');
+  let strictTypes = false;
+  if (typed) {
+    const text = await readFile(join(root, 'tsconfig.json'), 'utf8').catch(() => '');
+    try {
+      const cfg = JSON.parse(text) as { compilerOptions?: { strict?: boolean } };
+      strictTypes = cfg.compilerOptions?.strict === true;
+    } catch {
+      strictTypes = /"strict"\s*:\s*true/.test(text); // tsconfig with comments
+    }
+  }
+  const isTest = (p: string): boolean => /\.(test|spec)\.[cm]?[jt]sx?$/.test(p);
+  const isSource = (p: string): boolean => /\.[cm]?[jt]sx?$/.test(p) && !p.endsWith('.d.ts');
+  const source = files.map((f) => f.path.replace(/\\/g, '/')).filter(isSource);
+  const tests = source.filter(isTest);
+  const nonTest = source.filter((p) => !isTest(p));
+  const testRatio = nonTest.length === 0 ? 0 : Math.min(1, tests.length / nonTest.length);
+  return {
+    strictTypes,
+    typed,
+    testRatio,
+    fileCount: nonTest.length,
+    sourceBasenames: nonTest.map((p) => p.split('/').pop() ?? p),
+  };
+}
+
+/** Load fingerprint (persisted by `init`) falling back to a live structural scan, plus the boundary model. */
+async function fingerprintAndModel(
+  rt: Runtime,
+  store: IndexStore,
+): Promise<{ fingerprint: ArchitecturalFingerprint; model: BoundaryModel; files: { path: string }[] }> {
+  const files = store.allFileHashes();
+  const fingerprint = store.getFingerprint() ?? (await analyzeStructure(rt.root));
+  const model = store.loadModuleIntelligence() ?? inferBoundaries(files, store.loadFileEdges());
+  return { fingerprint, model, files };
+}
+
+/**
+ * Convention & philosophy profile (M11): the project's engineering culture
+ * (typing strictness, abstraction tolerance, layering, stability bias, scale,
+ * naming) inferred from the fingerprint + boundary model + scalar signals.
+ * Read-only; derives from the existing index (run `archon index` first).
+ */
+export async function cmdPhilosophy(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(null));
+    else console.log('philosophy: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const profile = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+    if (opts.json) console.log(JSON.stringify(profile, null, 2));
+    else console.log(formatPhilosophy(profile));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Preservation assessment (M14): would a proposed change to `target` erase an
+ * intentional / business-critical structure? Combines the file's risk + region
+ * (M13), the project's philosophy (M11), and its module topology (M9) into a
+ * preserve / caution / allow verdict. `change` defaults to `remove-abstraction`
+ * (the generic rewrite preservation most needs to guard). Read-only, advisory.
+ */
+export async function cmdPreserve(
+  rt: Runtime,
+  target: string,
+  change: ChangeKind = 'remove-abstraction',
+  opts: { json?: boolean } = {},
+): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(null));
+    else console.log('preserve: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    if (!files.some((f) => f.path === target)) {
+      if (opts.json) console.log(JSON.stringify(null));
+      else console.log(`preserve: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
+      return;
+    }
+    const all = store.allSymbols();
+    const definedFiles = new Set(all.map((s) => s.file));
+    const seeds = all.filter((s) => s.file === target).map((s) => s.name);
+    const radius = seeds.length > 0 ? await new SymbolGraph(store).blastRadius(seeds) : { symbols: seeds, files: [] };
+    const dependents = radius.symbols.filter((s) => !seeds.includes(s)).length;
+    const moduleName = moduleOf(target);
+    const moduleNode = model.modules.find((m) => m.name === moduleName);
+    const risk = scoreRisk({
+      file: target,
+      module: moduleNode,
+      blastRadius: dependents,
+      confidence: moduleConfidence(moduleName, files, definedFiles),
+    });
+    const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+    const verdict = assessPreservation({
+      target,
+      module: moduleNode,
+      risk,
+      philosophy,
+      change,
+      isGodModule: model.godModules.some((g) => g.name === moduleName),
+    });
+    if (opts.json) console.log(JSON.stringify(verdict, null, 2));
+    else console.log(formatPreservation(target, change, verdict));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Project-native agents (M18): generate the agent roster the detected stack +
+ * topology + philosophy imply (routing, state, api-contract, architecture-review,
+ * boundary-enforcer, dependency-cleanup, testing). Agents are derived, never
+ * hand-coded. Read-only; derives from the existing index (run `archon index`).
+ */
+export async function cmdAgents(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify([]));
+    else console.log('agents: no index yet — run `archon index` then `archon init`');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+    const agents = generateAgents(fingerprint, model, philosophy);
+    if (opts.json) console.log(JSON.stringify(agents, null, 2));
+    else console.log(formatAgents(agents));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Modules the Preservation Layer (M14) rules `preserve` against a generic
+ * `simplify` — the set the improvement engine must not auto-propose changes to.
+ * God modules are deliberately NOT protected (their complexity is accidental).
+ */
+function protectedModules(
+  model: BoundaryModel,
+  files: { path: string }[],
+  definedFiles: Set<string>,
+  philosophy: PhilosophyProfile,
+): Set<string> {
+  const godNames = new Set(model.godModules.map((g) => g.name));
+  const result = new Set<string>();
+  for (const m of model.modules) {
+    const risk = scoreRisk({
+      file: `${m.name}/index.ts`,
+      module: m,
+      blastRadius: m.fanIn,
+      confidence: moduleConfidence(m.name, files, definedFiles),
+    });
+    const verdict = assessPreservation({
+      target: m.name,
+      module: m,
+      risk,
+      philosophy,
+      change: 'simplify',
+      isGodModule: godNames.has(m.name),
+    });
+    if (verdict.disposition === 'preserve') result.add(m.name);
+  }
+  return result;
+}
+
+/**
+ * Conservative improvement proposals (M21): turn architecture-health findings
+ * (M12) into ranked, ROI-gated remediation steps, never proposing a change to a
+ * module the Preservation Layer (M14) protects. Read-only — it proposes; the
+ * apply path is the cognition loop. Derives from the existing index.
+ */
+export async function cmdImprove(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify({ proposals: [], skipped: [] }));
+    else console.log('improve: no index yet — run `archon index` first');
+    return;
+  }
+  const store = new IndexStore(indexPath);
+  try {
+    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    const report = detectViolations(buildViolationInput(store));
+    const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+    const definedFiles = new Set(store.allSymbols().map((s) => s.file));
+    const protectedSubjects = protectedModules(model, files, definedFiles, philosophy);
+    const improvements = proposeImprovements({ violations: report.violations, protectedSubjects });
+    if (opts.json) console.log(JSON.stringify(improvements, null, 2));
+    else console.log(formatImprovements(improvements));
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Execution simulation (M20): predict the impact of a proposed change to `target`
+ * BEFORE applying it — dependency propagation (blast radius), type-system + API-
+ * contract drift surface, dependency-cycle state, a regression-probability
+ * estimate, and an advisory autonomy verdict (auto / review / block). Composes
+ * M9 boundaries + M13 risk + M14 preservation + M15 churn + the symbol graph.
+ * `change` defaults to `modify`. Read-only and advisory — does not touch the
+ * Policy Engine; derives from the existing index (run `archon index` first).
+ */
+export async function cmdSimulate(
+  rt: Runtime,
+  target: string,
+  change: ChangeKind = 'modify',
+  opts: { json?: boolean } = {},
+): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  if (!existsSync(indexPath)) {
+    if (opts.json) console.log(JSON.stringify(null));
+    else console.log('simulate: no index yet — run `archon index` first');
+    return;
+  }
+  // Uses the full indexer (not a bare IndexStore) for `commitHistory()` — the M15
+  // churn signal that feeds the regression estimate's volatility term.
+  const { indexer, store, close } = await rt.indexer();
+  try {
+    const { fingerprint, model, files } = await fingerprintAndModel(rt, store);
+    if (!files.some((f) => f.path === target)) {
+      if (opts.json) console.log(JSON.stringify(null));
+      else console.log(`simulate: "${target}" is not an indexed file (run \`archon index\` to refresh)`);
+      return;
+    }
+    const all = store.allSymbols();
+    const definedFiles = new Set(all.map((s) => s.file));
+    const seeds = all.filter((s) => s.file === target).map((s) => s.name);
+    const radius = seeds.length > 0 ? await new SymbolGraph(store).blastRadius(seeds) : { symbols: seeds, files: [] };
+    const dependents = radius.symbols.filter((s) => !seeds.includes(s)).length;
+    const impactedFiles = radius.files.filter((f) => f !== target);
+
+    const moduleName = moduleOf(target);
+    const moduleNode = model.modules.find((m) => m.name === moduleName);
+    const dependentModules = [...new Set(impactedFiles.map(moduleOf))].filter((m) => m !== moduleName).sort();
+    const cycle = model.cycles.find((c) => c.includes(moduleName)) ?? [];
+
+    const confidence = moduleConfidence(moduleName, files, definedFiles);
+    const risk = scoreRisk({ file: target, module: moduleNode, blastRadius: dependents, confidence });
+    const philosophy = inferPhilosophy(fingerprint, model, await philosophySignals(rt.root, fingerprint, files));
+    const preservation = assessPreservation({
+      target,
+      module: moduleNode,
+      risk,
+      philosophy,
+      change,
+      isGodModule: model.godModules.some((g) => g.name === moduleName),
+    });
+
+    // Module churn (M15) → regression volatility, normalized by the mean churn of touched modules.
+    const evo = analyzeEvolution(await indexer.commitHistory(), model);
+    const moduleChurn = evo.hotspots.find((h) => h.name === moduleName)?.commits ?? 0;
+    const churned = evo.hotspots.filter((h) => h.commits > 0);
+    const churnRef = churned.length > 0 ? Math.max(1, churned.reduce((s, h) => s + h.commits, 0) / churned.length) : 1;
+
+    const report = simulateExecution({
+      target,
+      change,
+      moduleName,
+      risk,
+      preservation,
+      dependents,
+      impactedFiles,
+      dependentModules,
+      inCycle: cycle.length > 0,
+      cycle,
+      confidence,
+      moduleChurn,
+      churnRef,
+    });
+    if (opts.json) console.log(JSON.stringify(report, null, 2));
+    else console.log(formatSimulation(report));
+  } finally {
+    close();
+  }
+}
+
+/**
+ * Hooks introspection (M19): the static pre-write gate (forbidden-import,
+ * boundary-leak, never-modify) plus the post-write checks the detected stack
+ * implies (typecheck, tests). With no pending change the pre-write gate reports
+ * clean — the engine runs live before each loop write. Read-only.
+ */
+export async function cmdHooks(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
+  const indexPath = join(rt.root, rt.config.paths.index);
+  let fingerprint: ArchitecturalFingerprint;
+  if (existsSync(indexPath)) {
+    const store = new IndexStore(indexPath);
+    try {
+      fingerprint = store.getFingerprint() ?? (await analyzeStructure(rt.root));
+    } finally {
+      store.close();
+    }
+  } else {
+    fingerprint = await analyzeStructure(rt.root);
+  }
+  const findings = evaluatePreHooks({ writes: [], addedImports: [], existingEdges: [] });
+  const post = postHookChecks(fingerprint);
+  if (opts.json) console.log(JSON.stringify({ findings, post }, null, 2));
+  else console.log(formatHooks(findings, post));
 }
 
 /**
