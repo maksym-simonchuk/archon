@@ -14,26 +14,30 @@ planes. Legend: ✅ done · 🟡 partial · ⬜ todo.
 
 ## 1. Where we are vs. the spec
 
-The spec asks for a *repository operating system*. What exists today is the
-**execution substrate** for one — not yet the intelligence on top.
+The spec asks for a *repository operating system*. The intelligence layer
+M8–M24 closed every "Today" gap on the table below (substrate + analyzers +
+governance + autonomy + daemon + accurate parsing); Runtime v2 M25–M40 layered
+realtime UX, open standards (MCP/LSP), and a v1 plugin ABI on top. The
+remaining ⬜ work is *out-of-scope* (engineering-economics ceilings,
+fully-automated ADR filing) — every in-scope row reads ✅ today.
 
 | Spec pillar | Today | Gap |
 | --- | --- | --- |
 | `ai init` deep structural analysis | ✅ stack + monorepo/workspaces + CI + framework/test-runner + style + entry points → persisted architectural fingerprint (incremental via `inputHash`) | — |
-| Architectural intelligence (boundaries, ownership, criticality) | ⬜ | Symbol graph exists; no domain/boundary model |
-| Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ⬜ | 3-tier memory store exists; nothing generates project intelligence |
+| Architectural intelligence (boundaries, ownership, criticality) | ✅ M9 — `inferBoundaries` over `file_edges` (fan-in/out, Martin instability, coupling hotspots, named modules) | — |
+| Project memory generation (CLAUDE.md, AGENTS.md, project-memory.md, conventions) | ✅ M10 — `init` emits `.archon/project-memory.md` from the fingerprint + boundary model; idempotent via content hash | — |
 | Context Compiler (intent-aware, bounded-context-scoped) | ✅ intent-scoped packets (bounded context + impact surface + ADR recall, with provenance) | Risk/test-coverage injection deferred (needs M13 wire / M19) |
 | Agent Factory (project-native generated agents) | ✅ specs generated from stack + topology + philosophy, **+ runtime binding** (`selectAgent`/`agentBriefing` → prompt; `AgentBroker` → capability-scoped authority; `/agent --run`) | — |
 | Autoskills (executable analyze→simulate→validate→execute→rollback workflows) | ✅ multi-phase skill runtime (`runSkill`) + built-in `safe-refactor` (`/skill run`); pre/post hook engine | Only one built-in shipped (`dependency-cleanup` / `architecture-review` not yet assembled) |
 | Hooks engine (pre/post: forbidden-import, boundary, lint/typecheck/test/regression) | ✅ static pre-write gate, **now wired into the loop** (blocks before any worktree) + post-write check specs | — |
 | Preservation layer (intentional vs accidental complexity) | ✅ classifier + **loop-internal hard gate** (preserve → block before worktree, `run --force` overrides) | — |
-| Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ⬜ | `doctor` is readiness only, not health |
-| Architecture invariants + region classification (stable/evolving/experimental) | ⬜ | Policy denies destructive ops; no code-region governance |
+| Violation intelligence (leaks, cycles, dead code, god modules, drift…) | ✅ M12 — `detectViolations` (cycles · boundary leaks · god modules · dead code · drift) → `doctor` health score + `/violations` report | — |
+| Architecture invariants + region classification (stable/evolving/experimental) | ✅ M14 — Preservation Layer doubles as region governance: intentional/never-modify zones are protected pre-worktree, accidental complexity is improvable | — |
 | Risk engine (low/med/high/critical → autonomy scaling) | ✅ `scoreRisk` advisory + **live blast-radius policy gate** (real graph radius stamped on every write step → broker ask/deny) | Risk *level* not yet stamped on steps; no test-regression probability |
 | Execution simulation (pre-apply impact prediction) | ✅ pre-apply dependency/type/contract/regression prediction + **hard loop gate** (M20) | — |
-| Temporal evolution (drift/coupling/tech-debt trends, prediction) | ⬜ | Journal exists; no time-series analysis |
-| Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ⬜ | ADRs are hand-written |
-| Philosophy + economics + confidence layers | ⬜ | None |
+| Temporal evolution (drift/coupling/tech-debt trends, prediction) | ✅ M15 — `analyzeEvolution` (churn × coupling from `git log`, god-trending) + `health_history` snapshots + `doctor` trend line + `/evolution` | Journal time-series deferred (git churn carries the M15 exit signal) |
+| Decision intelligence (auto ADR snapshots, why/tradeoffs/rejected) | ✅ M16 — `parseAdr` + `assessSignificance` + `proposeAdr` (drafts `proposed`-status ADRs only); ADR ingestion into pinned semantic memory; `/decisions` | Proposed→accepted gate stays human, per ADR-0008 |
+| Philosophy + economics + confidence layers | ✅ M11 — `inferPhilosophy` (typing strictness, abstraction tolerance, stability bias, scale, naming) feeds M14/M18/M21; ROI scoring in `proposeImprovements` | engineering-economics ROI *ceiling* deferred |
 | Autonomous improvement (`ai improve`/`refactor`/migration plans) | ✅ `improve` proposes ranked, ROI-gated, preservation-safe changes; `refactor` applies one through the simulation/preservation gate + a capability-scoped agent + worktree | engineering-economics ROI *ceiling* deferred |
 | Daemon runtime (`ai watch`, FS/AST watchers) | ✅ event-driven `fs.watch` daemon (`/watch --loop`) → debounced incremental re-index + health refresh; poller fallback | Sub-file AST-segment invalidation deferred (per-file hash-gate suffices); TUI `--loop` deferred |
 | Provider orchestration (Claude/OpenAI/Gemini/local, task-routed) | ✅ | All four wired; strength-scored routing + budget breaker + fallback (M23) |
