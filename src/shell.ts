@@ -112,6 +112,7 @@ export const COMMANDS = [
   '/cost',
   '/model',
   '/think',
+  '/approve',
   '/doctor',
   '/memory',
   '/promote',
@@ -155,6 +156,7 @@ const SHELL_HELP = `commands:
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
   /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
+  /approve [allow|deny] [id]  resolve a pending approval card (M32)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -220,6 +222,7 @@ function argCandidates(head: string, words: string[]): string[] {
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
   if (head === '/think' && words.length === 2) return ['/think off', '/think summary', '/think trace'];
+  if (head === '/approve' && words.length === 2) return ['/approve allow', '/approve deny'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -446,6 +449,36 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/model':
       await cmdModel(rt);
       return true;
+    case '/approve': {
+      // Resolve a pending approval card (M32). Usage:
+      //   /approve              → show pending requests' ids
+      //   /approve allow [id]   → allow the given id (default: the only one)
+      //   /approve deny  [id]   → deny  the given id
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const pending = rt.approval.pendingIds();
+      if (words.length === 0) {
+        if (pending.length === 0) console.log('no pending approvals');
+        else console.log(`pending approvals:\n  ${pending.join('\n  ')}`);
+        return true;
+      }
+      const decision = words[0];
+      if (decision !== 'allow' && decision !== 'deny') {
+        console.log('usage: /approve [allow|deny] [id]');
+        return true;
+      }
+      const id = words[1] ?? (pending.length === 1 ? pending[0] : undefined);
+      if (!id) {
+        console.log(
+          pending.length === 0
+            ? 'no pending approvals'
+            : `multiple pending — specify id: ${pending.join(', ')}`,
+        );
+        return true;
+      }
+      const ok = rt.approval.resolve(id, decision, session.currentRunId ?? id);
+      console.log(ok ? `${decision} ${id}` : `no such approval: ${id}`);
+      return true;
+    }
     case '/think': {
       // Reasoning visibility toggle (M28). `/think` with no arg shows the
       // current mode; `/think off|summary|trace` updates it. NEVER shows

@@ -15,6 +15,7 @@ import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
 import type { BlastRadius, MemoryTier, Profile, Task } from './core/types';
 import { AgentBroker } from './effecting/agent-broker';
+import { ApprovalBroker } from './effecting/approval';
 import { AuditLog } from './effecting/audit-log';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
@@ -133,6 +134,13 @@ export interface Runtime {
    * namespaces and unlisted caps return 'deny'.
    */
   authorizeV2(capability: string): Promise<'allow' | 'deny'>;
+  /**
+   * Approval broker (M32). Publishes `approval.request` on the bus and
+   * blocks the broker's caller until the UI resolves with allow|deny.
+   * A single shared instance per runtime so every surface (TUI, automation,
+   * future MCP relays) resolves through the same queue.
+   */
+  readonly approval: ApprovalBroker;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -155,6 +163,12 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // option (router, MCP server, plugin host) can be wired with the same wire.
   // Bounded ring + drop-oldest semantics live inside InMemoryEventBus.
   const bus = createEventBus();
+
+  // Approval broker (M32). One instance per runtime — every surface that
+  // needs human confirmation routes through it. Publishes `approval.request`
+  // on the bus; the TUI's subscriber renders a card and calls back via
+  // `approval.resolve`.
+  const approval = new ApprovalBroker(bus);
 
   // Optional OTel exporter (M37). Off by default — only activates if
   // `OTEL_EXPORTER_OTLP_ENDPOINT` is present in the environment. Telemetry is
@@ -462,6 +476,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     pluginHost,
     policy,
     authorizeV2,
+    approval,
     close,
   };
 }

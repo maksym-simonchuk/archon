@@ -35,8 +35,8 @@ export type ArchonEvent =
   | { kind: 'plan.ready'; runId: string; at: number; specPath: string }
   | { kind: 'tool.start'; runId: string; at: number; tool: string; argsSummary: string }
   | { kind: 'tool.result'; runId: string; at: number; tool: string; ok: boolean; summary: string }
-  | { kind: 'approval.request'; runId: string; at: number; capability: string; target: string; blastRadius: number }
-  | { kind: 'approval.resolve'; runId: string; at: number; decision: 'allow' | 'deny' }
+  | { kind: 'approval.request'; runId: string; at: number; approvalId: string; capability: string; target: string; blastRadius: number; reason?: string; preview?: string }
+  | { kind: 'approval.resolve'; runId: string; at: number; approvalId: string; decision: 'allow' | 'deny' }
   | { kind: 'verdict'; runId: string; at: number; ok: boolean; summary: string }
   | { kind: 'bus.lost'; runId: string; at: number; dropped: number };
 

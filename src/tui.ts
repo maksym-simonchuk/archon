@@ -296,6 +296,40 @@ const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' } a
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+// ── Approval card (M32) ─────────────────────────────────────────────────────
+//
+// Pure builder so the rendering is testable without spinning up a TUI session.
+// Returns [] when there's nothing pending; otherwise a 5-row yellow-bordered
+// card sized to `cols`. The card is informational — `/approve <a|d>` (handled
+// in shell.ts) is what actually flips the broker.
+
+export interface ApprovalCardInput {
+  approvalId: string;
+  capability: string;
+  target: string;
+  blastRadius: number;
+  reason?: string;
+  preview?: string;
+}
+
+export function buildApprovalCardRows(card: ApprovalCardInput | undefined, more: number, cols: number): string[] {
+  if (!card || cols < 4) return [];
+  const span = Math.max(0, cols - 2);
+  const innerW = Math.max(0, cols - 2);
+  const title = `${bold('⏵ approval requested')} ${dim(`(${card.capability} · ${card.blastRadius} files)`)}`;
+  const target = card.target;
+  const reasonTxt = card.reason ? ` · ${card.reason}` : '';
+  const moreTxt = more > 0 ? ` · +${more} more` : '';
+  const hint = `${dim(`/approve allow ${card.approvalId.slice(0, 12)}…`)}${dim(reasonTxt)}${dim(moreTxt)}`;
+  return [
+    yellow(`╭${'─'.repeat(span)}╮`),
+    yellow('│') + padTo(clip(' ' + title, innerW), innerW) + yellow('│'),
+    yellow('│') + padTo(clip(' ' + target, innerW), innerW) + yellow('│'),
+    yellow('│') + padTo(clip(' ' + hint, innerW), innerW) + yellow('│'),
+    yellow(`╰${'─'.repeat(span)}╯`),
+  ];
+}
+
 // ── Alt-screen control ───────────────────────────────────────────────────────
 
 const ENTER_ALT = '\x1b[?1049h';
@@ -339,6 +373,19 @@ export async function startTui(): Promise<void> {
   let turnTokensIn = 0;
   let turnTokensOut = 0;
   let turnCostUsd = 0;
+  // Approval card (M32). The bus subscriber accumulates requests here; the
+  // renderer paints the oldest as a card above the input box. `/approve a|d`
+  // resolves it through the broker which removes it from this list via the
+  // matching `approval.resolve` event.
+  interface PendingApproval {
+    approvalId: string;
+    capability: string;
+    target: string;
+    blastRadius: number;
+    reason?: string;
+    preview?: string;
+  }
+  let pendingApprovals: PendingApproval[] = [];
   // Claude-Code-style turn markers: the first output line of every turn is tagged
   // so it renders with a `⏺` glyph. `awaitingResponse` arms the next non-empty
   // pushed line as that start; `responseStarts` keeps the marks for scrollback.
@@ -474,6 +521,22 @@ export async function startTui(): Promise<void> {
           turnTokensIn += e.usage.inputTokens;
           turnTokensOut += e.usage.outputTokens;
           turnCostUsd += e.usage.costUsd;
+          scheduleRender();
+        } else if (e.kind === 'approval.request') {
+          // The broker is asking the user — render an inline card with the
+          // approvalId so /approve allow|deny [id] can resolve it.
+          pendingApprovals.push({
+            approvalId: e.approvalId,
+            capability: e.capability,
+            target: e.target,
+            blastRadius: e.blastRadius,
+            ...(e.reason ? { reason: e.reason } : {}),
+            ...(e.preview ? { preview: e.preview } : {}),
+          });
+          scheduleRender();
+        } else if (e.kind === 'approval.resolve') {
+          // Drop the matching pending entry — the broker has unblocked.
+          pendingApprovals = pendingApprovals.filter((p) => p.approvalId !== e.approvalId);
           scheduleRender();
         } else if (e.kind === 'bus.lost') {
           // Surface back-pressure drops so the user knows the meter may be
@@ -684,6 +747,11 @@ export async function startTui(): Promise<void> {
       return clip(`  ${marker} ${label}  ${dim(DESCRIPTIONS[cmd] ?? '')}`, cols);
     });
 
+  // Approval card (M32). Delegates to the module-level `buildApprovalCardRows`
+  // so the renderer stays testable in isolation.
+  const approvalCardRows = (cols: number): string[] =>
+    buildApprovalCardRows(pendingApprovals[0], Math.max(0, pendingApprovals.length - 1), cols);
+
   const render = (): void => {
     const cols = stdout.columns ?? 80;
     const rows = stdout.rows ?? 24;
@@ -703,17 +771,29 @@ export async function startTui(): Promise<void> {
       belowBox = menuRows(cols, menu, menuStart, items.length);
     }
 
+    // Approval card sits above the input — added to the chrome height budget
+    // so it doesn't collide with the transcript. Five rows when present.
+    const approvalRows = approvalCardRows(cols);
+
     // Build the input box rows up front so the variable height feeds into the
     // height budget. The box itself = box-top(1) + boxRows + box-bottom(1).
     const box = searchMode ? searchBox(cols) : inputBox(cols);
     const boxH = 2 + box.rows.length;
 
     // Fixed chrome = header(1) + box(boxH) + footer(1); plus statusH (activity
-    // line and/or queued-type-ahead preview); plus belowBox.
+    // line and/or queued-type-ahead preview); plus belowBox; plus the approval
+    // card if a request is pending (M32). The card is non-negotiable — it
+    // displaces transcript rows, but never the input or the menu.
     const statusH = (busy ? 1 : 0) + (queued !== null ? 1 : 0);
-    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length;
+    let approvalH = approvalRows.length;
+    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length - approvalH;
     if (transcriptHeight < 1) {
       belowBox = [];
+      transcriptHeight = rows - 2 - boxH - statusH - approvalH;
+    }
+    if (transcriptHeight < 1) {
+      // Pathological tiny terminal: drop the card too so the input stays usable.
+      approvalH = 0;
       transcriptHeight = Math.max(1, rows - 2 - boxH - statusH);
     }
 
@@ -779,6 +859,10 @@ export async function startTui(): Promise<void> {
     // line (if any) sits just under it.
     if (busy) frame.push(statusRow(cols));
     if (queued !== null) frame.push(clip(dim(` ⏎ queued — ${queued}`), cols));
+
+    // Approval card sits above the input box so the user reads it in the same
+    // glance as the prompt they're about to type into.
+    if (approvalH > 0) for (const r of approvalRows) frame.push(r);
 
     // Framed input box: ╭──╮ / │ … │ × boxRows / ╰──╯. The cursor sits on the
     // box row that matches the buffer's cursor row (Claude-Code multi-line look).
