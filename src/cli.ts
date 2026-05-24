@@ -16,16 +16,24 @@ const die = (e: unknown): void => {
 
 const [arg] = process.argv.slice(2);
 
-// `init` is the one pre-launch escape hatch — it must run WITHOUT a runtime,
-// since the surface itself can't start until `.archon/policy.yaml` exists. Every
-// other command lives inside the interactive surface.
+// Two pre-launch entry points — both bypass the interactive surface because
+// neither is a *user* command: `init` scaffolds a fresh repo before the
+// surface can start (policy.yaml doesn't exist yet), `mcp` is an integration
+// transport invoked by another process (Claude Code / Cursor / Codex) over
+// stdio JSON-RPC. Every other CLI argument falls through to the shell/TUI.
 if (arg === 'init') {
   cmdInit(process.cwd()).catch(die);
+} else if (arg === 'mcp') {
+  // Read-only MCP server over stdio (ADR-0020). Caller manages lifecycle by
+  // closing the pipe; we exit cleanly when stdin ends.
+  import('./services/mcp/serve')
+    .then(({ serveMcpStdio }) => serveMcpStdio(process.cwd()))
+    .catch(die);
 } else {
   if (process.argv.length > 2) {
     console.error(
       'archon: one-shot commands were removed — launching the interactive surface (type /help inside). ' +
-        '(`archon init` scaffolds a fresh repo.)',
+        '(`archon init` scaffolds a fresh repo; `archon mcp` exposes the read-only MCP surface over stdio.)',
     );
   }
   // Full-screen TUI needs a real terminal on both ends; piped/redirected I/O
