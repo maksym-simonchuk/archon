@@ -39,6 +39,7 @@ import { IndexStore } from './sensing/store';
 import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
+import { loadMcpConfig, type McpConfig } from './services/mcp/mcp-config';
 import { createEventBus, type EventBus } from './services/event-bus';
 import { OtelExporter, exporterFromEnv } from './services/otel';
 import { createAiClient } from './services/providers/ai-sdk';
@@ -168,6 +169,13 @@ export interface Runtime {
    * through the broker (ADR-0015 invariant 2).
    */
   readonly workflows: WorkflowRegistry;
+  /**
+   * Configured outbound MCP servers (M30, ADR-0015). Parsed from
+   * `.archon/mcp.yaml` at runtime construction. Empty list when the file
+   * is absent. *Configured* ≠ *authorized* — every outbound call still
+   * routes through `authorizeV2('mcp:<server>:<tool>')`.
+   */
+  readonly mcp: McpConfig;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -184,6 +192,11 @@ export interface Runtime {
 export async function buildRuntime(root: string): Promise<Runtime> {
   const config = await loadConfig(root);
   const policyDoc: PolicyDocument = loadPolicy(await readFile(join(root, config.paths.policy), 'utf8'));
+  // Configured outbound MCP servers (M30). Missing `.archon/mcp.yaml` is not
+  // an error — the policy still default-denies the `mcp:*` namespace, so a
+  // server has to be both *configured here* and *authorized in policy.yaml*
+  // to be callable. The two layers compose; this one just enumerates.
+  const mcp = await loadMcpConfig(root);
   const audit = new AuditLog();
 
   // The v2 event bus is built first so every downstream that takes it as an
@@ -552,6 +565,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     patches,
     specs,
     workflows,
+    mcp,
     close,
   };
 }

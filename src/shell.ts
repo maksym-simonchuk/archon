@@ -168,7 +168,7 @@ const SHELL_HELP = `commands:
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
   /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
-  /mcp [list|tools|check <server>:<tool>]  list grants · tools: read-only surface Archon exposes (M30/M31)
+  /mcp [list|tools|servers|check <server>:<tool>]  grants · tools (read-only surface) · servers (mcp.yaml) (M30/M31)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -278,7 +278,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
-  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp tools', '/mcp check'];
+  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp tools', '/mcp servers', '/mcp check'];
   if (head === '/replay' && words.length === 2) return ['/replay --live', '/replay --speed'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
@@ -886,6 +886,24 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         console.log(dim('every tool is mutating=false; mutating tools require explicit mutatingEnabled per ADR-0015'));
         return true;
       }
+      if (sub === 'servers') {
+        // Configured outbound MCP servers from `.archon/mcp.yaml` (M30). Each
+        // line also annotates the policy verdict for the namespace, so the
+        // user can see at a glance whether a configured server is callable.
+        const servers = rt.mcp.servers;
+        if (servers.length === 0) {
+          console.log(dim('no servers configured · add .archon/mcp.yaml or grant mcp:* in policy.yaml'));
+          return true;
+        }
+        console.log(bold(`mcp servers (${servers.length})`));
+        for (const s of servers) {
+          const grants = policy.v2Allowlist('mcp').filter((g) => g === '*' || g === s.id || g.startsWith(`${s.id}:`));
+          const grant = grants.length === 0 ? dim('(no grants)') : grants.join(', ');
+          const argv = s.args && s.args.length > 0 ? ` ${s.args.join(' ')}` : '';
+          console.log(`  ${cyan(s.id)}  ${dim(`${s.command}${argv}`)}  ${grant}`);
+        }
+        return true;
+      }
       if (sub === 'list' || sub === 'status') {
         const allow = policy.v2Allowlist('mcp');
         if (allow.length === 0) {
@@ -915,7 +933,7 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         console.log(`${target}: ${verdict === 'allow' ? cyan('allow') : 'deny'}`);
         return true;
       }
-      console.log('usage: /mcp [list|tools|check <server>:<tool>]');
+      console.log('usage: /mcp [list|tools|servers|check <server>:<tool>]');
       return true;
     }
     case '/spec': {
