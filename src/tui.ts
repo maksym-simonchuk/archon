@@ -253,6 +253,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/approve': 'resolve a pending approval card (allow|deny [id])',
   '/diff': 'inspect & stage the queued patch (toggle e.h|apply|discard)',
   '/replay': 'replay a recorded bus stream (no arg: list recent runs)',
+  '/workflow': 'drive registered DAG workflows (list|run|resume)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',

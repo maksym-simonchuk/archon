@@ -116,6 +116,7 @@ export const COMMANDS = [
   '/diff',
   '/replay',
   '/spec',
+  '/workflow',
   '/doctor',
   '/memory',
   '/promote',
@@ -163,6 +164,7 @@ const SHELL_HELP = `commands:
   /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
   /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
+  /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -271,6 +273,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/approve' && words.length === 2) return ['/approve allow', '/approve deny'];
   if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
+  if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -706,6 +709,96 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       const [name, ...more] = rest;
       if (!name) console.log('usage: /tool <name> [json-input]');
       else await cmdTool(rt, name, more.join(' ').trim() || undefined);
+      return true;
+    }
+    case '/workflow': {
+      // Drive named workflows (M33). The registry owns suspended-run state;
+      // `/workflow resume <runId> [json]` continues a paused run.
+      const [sub, ...more] = rest;
+      if (!sub || sub === 'list' || sub === 'status') {
+        const defs = rt.workflows.list();
+        if (defs.length === 0) {
+          console.log('no workflows registered');
+        } else {
+          console.log(bold(`workflows (${defs.length})`));
+          for (const d of defs) console.log(`  ${cyan(d.id)}  ${dim(d.description)}`);
+        }
+        const susp = rt.workflows.suspendedRuns();
+        if (susp.length > 0) {
+          console.log(bold(`suspended (${susp.length})`));
+          for (const s of susp) console.log(`  ${s.runId}  ${dim(`${s.workflowId} @ ${s.stepId}: ${s.reason}`)}`);
+        }
+        return true;
+      }
+      if (sub === 'run') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /workflow run <id> [json-input]');
+          return true;
+        }
+        const rawInput = more.slice(1).join(' ').trim();
+        let input: unknown = {};
+        if (rawInput) {
+          try {
+            input = JSON.parse(rawInput);
+          } catch (e) {
+            console.log(`invalid JSON input: ${msg(e)}`);
+            return true;
+          }
+        }
+        const out = await rt.workflows.run(id, input);
+        if (!out) {
+          console.log(`no such workflow: ${id}`);
+          return true;
+        }
+        const { runId, result } = out;
+        console.log(bold(`${id} → run ${runId}`));
+        if (result.suspended) {
+          console.log(`  suspended at ${result.suspended.stepId}: ${result.suspended.reason}`);
+          console.log(dim(`  resume with: /workflow resume ${runId} {...}`));
+        } else if (result.ok) {
+          console.log(`  ${cyan('ok')}  ${dim(JSON.stringify(result.output))}`);
+        } else {
+          console.log(`  ${dim('failed at')} ${result.failedAt}: ${result.error}`);
+        }
+        return true;
+      }
+      if (sub === 'resume') {
+        const runId = more[0];
+        if (!runId) {
+          console.log('usage: /workflow resume <runId> [json-resolution]');
+          return true;
+        }
+        const rawResolution = more.slice(1).join(' ').trim();
+        let resolution: Record<string, unknown> = {};
+        if (rawResolution) {
+          try {
+            const parsed: unknown = JSON.parse(rawResolution);
+            if (typeof parsed !== 'object' || parsed === null) {
+              console.log('resolution must be a JSON object');
+              return true;
+            }
+            resolution = parsed as Record<string, unknown>;
+          } catch (e) {
+            console.log(`invalid JSON resolution: ${msg(e)}`);
+            return true;
+          }
+        }
+        const result = await rt.workflows.resume(runId, resolution);
+        if (!result) {
+          console.log(`no suspended run: ${runId}`);
+          return true;
+        }
+        if (result.suspended) {
+          console.log(`  re-suspended at ${result.suspended.stepId}: ${result.suspended.reason}`);
+        } else if (result.ok) {
+          console.log(`  ${cyan('ok')}  ${dim(JSON.stringify(result.output))}`);
+        } else {
+          console.log(`  ${dim('failed at')} ${result.failedAt}: ${result.error}`);
+        }
+        return true;
+      }
+      console.log('usage: /workflow [list|run <id> [json]|resume <runId> [json]]');
       return true;
     }
     case '/spec': {

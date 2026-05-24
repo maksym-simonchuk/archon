@@ -20,6 +20,8 @@ import { AuditLog } from './effecting/audit-log';
 import { PatchStore } from './effecting/diff/patch-store';
 import { BrokerSpecStore } from './cognition/openspec/broker-spec-store';
 import type { SpecStore } from './cognition/openspec/spec-commands';
+import { WorkflowRegistry } from './cognition/workflow-registry';
+import { buildRepoDoctorWorkflow } from './cognition/builtin-workflows';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
@@ -159,6 +161,13 @@ export interface Runtime {
    * instance; the planner also calls `writeChange` after a plan succeeds.
    */
   readonly specs: SpecStore;
+  /**
+   * Workflow registry (M33). Holds named workflows + currently-suspended
+   * runs; the shell drives them via `/workflow run|resume|status`. The
+   * registry itself is authority-free — step bodies route every effect
+   * through the broker (ADR-0015 invariant 2).
+   */
+  readonly workflows: WorkflowRegistry;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -237,6 +246,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // through the broker, so plan-artifact emit is policy-gated like any other
   // write. Shared across `/spec` and the planner-emit pathway.
   const specs: SpecStore = new BrokerSpecStore(brokerAt(root));
+
+  // Workflow registry (M33). One per runtime — wired to the same bus so
+  // step.start/result events stay correlated with the run.
+  const workflows = new WorkflowRegistry(bus);
+  workflows.register(buildRepoDoctorWorkflow(), 'parallel quick checks + a one-line synthesis');
 
   // A trusted broker narrowed to one agent's declared capabilities (M18). It can
   // only deny actions the agent didn't declare — never widen authority — so the
@@ -530,6 +544,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     approval,
     patches,
     specs,
+    workflows,
     close,
   };
 }
