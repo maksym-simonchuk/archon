@@ -32,6 +32,7 @@ import { IndexStore } from './sensing/store';
 import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
+import { createEventBus, type EventBus } from './services/event-bus';
 import { createAiClient } from './services/providers/ai-sdk';
 import { resolveModels } from './services/model-catalog';
 import { PluginHost } from './services/plugin-host';
@@ -89,6 +90,13 @@ export interface Runtime {
   readonly llmPlanning: boolean;
   /** Configured providers: whether a client-builder exists (`supported`) and whether its key is in the env (key value never exposed). */
   readonly providerStatus: { id: string; supported: boolean; keyPresent: boolean }[];
+  /**
+   * Runtime v2 event bus (see `docs/RUNTIME-V2.md` §4.1, ADR-0015). Every
+   * surface that needs to observe the runtime — TUI token meter, OTel exporter,
+   * replay, eval recorder, event-listener plugins — subscribes here. The bus
+   * carries no authority; it is a wire, not a gate.
+   */
+  readonly bus: EventBus;
   /** Planner using the chosen strategy (ProviderPlanner, else ScaffoldStrategy). */
   planner(): Planner;
   /** Assemble the budgeted repo-map context for a task (empty for the offline planner). */
@@ -134,6 +142,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const policyDoc: PolicyDocument = loadPolicy(await readFile(join(root, config.paths.policy), 'utf8'));
   const audit = new AuditLog();
 
+  // The v2 event bus is built first so every downstream that takes it as an
+  // option (router, MCP server, plugin host) can be wired with the same wire.
+  // Bounded ring + drop-oldest semantics live inside InMemoryEventBus.
+  const bus = createEventBus();
+
   const models = resolveModels(config.providers);
   const clients = buildClients(config.providers);
   const router = new ProviderRouter(models, clients, {
@@ -144,6 +157,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     // router ever needs a fallback. `pluginHost` is defined below — the closure
     // captures it and is never called before buildRuntime returns. See ADR-0012.
     providerPlugins: async () => (await pluginHost()).providerPlugins(),
+    // The router publishes per-token deltas + a final usage event on this bus
+    // for the surfaces that subscribe (TUI token meter, OTel, replay).
+    bus,
   });
 
   const llmPlanning = models.length > 0 && clients.length > 0;
@@ -383,6 +399,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const close = (): void => {
     memoryStore?.close();
     journalStore?.close();
+    // Closes every live subscriber's iterator cleanly. Pending publications
+    // never throw, so a producer racing close just drops on the floor.
+    bus.close();
   };
 
   return {
@@ -391,6 +410,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     router,
     llmPlanning,
     providerStatus,
+    bus,
     planner,
     context,
     brokerAt,

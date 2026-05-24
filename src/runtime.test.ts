@@ -160,4 +160,40 @@ describe('buildRuntime (composition root)', () => {
     b.journal();
     expect(() => b.close()).not.toThrow();
   });
+
+  it('exposes a shared event bus that survives publish→subscribe round-trip', async () => {
+    const runtime = await buildRuntime(await repo());
+    try {
+      // Bus is part of the public Runtime contract — every v2 surface (TUI,
+      // OTel, replay, listener plugins) subscribes here. A round-trip
+      // publish→subscribe asserts the wire is actually live.
+      const received: string[] = [];
+      const task = (async (): Promise<void> => {
+        for await (const e of runtime.bus.subscribe()) {
+          received.push(e.kind);
+          if (e.kind === 'turn.done') break;
+        }
+      })();
+      // Allow the subscriber to install before we publish.
+      await new Promise((r) => setImmediate(r));
+      runtime.bus.publish({ kind: 'turn.start', runId: 'r1', at: 1, goal: 'g' });
+      runtime.bus.publish({ kind: 'turn.done', runId: 'r1', at: 2, ok: true });
+      await task;
+      expect(received).toEqual(['turn.start', 'turn.done']);
+    } finally {
+      runtime.close();
+    }
+  });
+
+  it('rt.close() closes the bus (subscribers see iteration end)', async () => {
+    const runtime = await buildRuntime(await repo());
+    const drained = (async (): Promise<number> => {
+      let n = 0;
+      for await (const _e of runtime.bus.subscribe()) n++;
+      return n;
+    })();
+    await new Promise((r) => setImmediate(r));
+    runtime.close();
+    await expect(drained).resolves.toBe(0);
+  });
 });
