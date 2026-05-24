@@ -114,6 +114,7 @@ export const COMMANDS = [
   '/think',
   '/approve',
   '/diff',
+  '/replay',
   '/doctor',
   '/memory',
   '/promote',
@@ -159,6 +160,7 @@ const SHELL_HELP = `commands:
   /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
   /approve [allow|deny] [id]  resolve a pending approval card (M32)
   /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
+  /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -178,6 +180,46 @@ tip: as you type, a dimmed suggestion (recent history / commands) trails the
 cursor — press → to accept it, Tab to complete a command.`;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * One-line summary of an ArchonEvent for `/replay`. The journal stores the
+ * full event payload — this just renders the fields a human would scan for
+ * when reconstructing what happened during a run.
+ */
+function summarizeBusEvent(e: import('./services/event-bus').ArchonEvent): string {
+  switch (e.kind) {
+    case 'turn.start':
+      return e.goal.slice(0, 80);
+    case 'turn.done':
+      return `ok=${e.ok}${e.summary ? ` · ${e.summary}` : ''}`;
+    case 'token.delta':
+      return `${e.provider}/${e.modelId} ${JSON.stringify(e.text)}`;
+    case 'tokens.usage':
+      return `${e.provider}/${e.modelId} in=${e.usage.inputTokens} out=${e.usage.outputTokens} $${e.usage.costUsd.toFixed(4)}`;
+    case 'plan.ready':
+      return e.specPath;
+    case 'tool.start':
+      return `${e.tool} ${e.argsSummary}`;
+    case 'tool.result':
+      return `${e.tool} ok=${e.ok} ${e.summary}`;
+    case 'approval.request':
+      return `${e.capability} → ${e.target} (blast=${e.blastRadius})`;
+    case 'approval.resolve':
+      return `${e.approvalId} = ${e.decision}`;
+    case 'verdict':
+      return `ok=${e.ok} · ${e.summary}`;
+    case 'patch.staged':
+      return `${e.patchId} files=${e.files.length} hunks=${e.hunks}`;
+    case 'patch.toggled':
+      return `${e.patchId} ${e.editIndex}.${e.hunkIndex} = ${e.accepted}`;
+    case 'patch.resolved':
+      return `${e.patchId} writes=${e.writes} rejected=${e.rejected} errors=${e.errors}`;
+    case 'patch.discarded':
+      return e.patchId;
+    case 'bus.lost':
+      return `dropped=${e.dropped}`;
+  }
+}
 
 // Zero-dependency ANSI styling: active only on a real TTY and when NO_COLOR is
 // unset (https://no-color.org), so piped/non-interactive output stays plain.
@@ -572,6 +614,41 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       }
 
       console.log('usage: /diff [toggle e.h|apply|discard]');
+      return true;
+    }
+    case '/replay': {
+      // Replay a recorded bus stream (M38). Reads from TaskJournal's
+      // bus_journal table — every event Archon emitted for the run, in
+      // append order. The shell prints a compact one-line-per-event view;
+      // the journal preserves the full event so future surfaces (UI replay,
+      // OTel re-export) can reconstruct anything.
+      const ref = arg.trim();
+      const journal = rt.journal();
+      if (ref === '') {
+        const recent = journal.recentRunIds(20);
+        if (recent.length === 0) {
+          console.log('no recorded runs');
+          return true;
+        }
+        console.log(bold('recent runs'));
+        for (const r of recent) {
+          const ts = new Date(r.lastAt).toISOString();
+          console.log(`  ${dim(ts)}  ${r.runId}  ${dim(`(${r.events} events)`)}`);
+        }
+        return true;
+      }
+      const stream = journal.replayBus(ref);
+      if (stream.length === 0) {
+        console.log(`no events for ${ref}`);
+        return true;
+      }
+      const start = stream[0]?.at ?? 0;
+      for (const row of stream) {
+        const dt = (row.at - start).toString().padStart(5);
+        const summary = summarizeBusEvent(row.event);
+        console.log(`  ${dim(`+${dt}ms`)}  ${cyan(row.kind.padEnd(18))}  ${summary}`);
+      }
+      console.log(dim(`replayed ${stream.length} events`));
       return true;
     }
     case '/think': {

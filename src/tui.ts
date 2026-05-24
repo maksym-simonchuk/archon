@@ -252,6 +252,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/think': 'reasoning visibility off|summary|trace (never raw CoT)',
   '/approve': 'resolve a pending approval card (allow|deny [id])',
   '/diff': 'inspect & stage the queued patch (toggle e.h|apply|discard)',
+  '/replay': 'replay a recorded bus stream (no arg: list recent runs)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',

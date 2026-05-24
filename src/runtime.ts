@@ -192,6 +192,10 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const otel = otelOpts ? new OtelExporter(otelOpts) : undefined;
   otel?.attach(bus);
 
+  // Bus journal recorder lifecycle flag (M38). The recorder loop is wired
+  // below, after the journal getter is declared.
+  let busRecorderAlive = true;
+
   const models = resolveModels(config.providers);
   const clients = buildClients(config.providers);
   const router = new ProviderRouter(models, clients, {
@@ -234,6 +238,22 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // recall ranks against the stored matrix instead of re-embedding each query (M24).
   const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory), embedText));
   const journal = (): TaskJournal => (journalStore ??= new TaskJournal(join(root, config.paths.journal)));
+
+  // Persist every bus event for later replay via `/replay <runId>`. The
+  // journal is lazy — the recorder calls `journal()` on its first observed
+  // event, which opens sqlite on demand. sqlite write errors are swallowed
+  // (disk full, permission, schema mismatch) so a misbehaving disk can't
+  // stall cognition; the loss is observable only by missing journal rows.
+  void (async (): Promise<void> => {
+    for await (const e of bus.subscribe()) {
+      if (!busRecorderAlive) break;
+      try {
+        journal().appendBusEvent(e);
+      } catch {
+        /* drop — replay loses one row, the engine keeps running */
+      }
+    }
+  })();
   const computeCore = async (): Promise<ComputeCore> => (core ??= await loadComputeCore());
 
   const planner = (): Planner => new Planner(strategy);
@@ -457,6 +477,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     Promise.resolve(policy().evaluateV2(capability));
 
   const close = (): void => {
+    // Stop the bus journal recorder before closing the journal — otherwise a
+    // racing event could try to write through a closed sqlite handle.
+    busRecorderAlive = false;
     memoryStore?.close();
     journalStore?.close();
     // Best-effort final flush of any buffered spans. The exporter swallows
