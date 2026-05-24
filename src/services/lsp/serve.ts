@@ -11,7 +11,7 @@
 
 import { buildRuntime } from '../../runtime';
 import { archonLspHandlers } from './archon-handlers';
-import { ArchonLspServer } from './server';
+import { ArchonLspServer, type LspTransport } from './server';
 import { lspStdioTransport } from './stdio';
 
 /**
@@ -19,10 +19,17 @@ import { lspStdioTransport } from './stdio';
  * resolve once the transport closes (editor dropped the pipe or signal
  * caught). The runtime is closed before resolving so any open sqlite
  * handles flush cleanly.
+ *
+ * `transport` defaults to a real `process.stdin/stdout` adapter; tests pass
+ * a paired PassThrough-backed transport to drive the full boot path without
+ * spawning a child process (mirror of `serveMcpStdio`).
  */
-export async function serveLspStdio(root: string = process.cwd()): Promise<void> {
+export async function serveLspStdio(
+  root: string = process.cwd(),
+  transport: LspTransport = lspStdioTransport(),
+): Promise<void> {
   const rt = await buildRuntime(root);
-  const io = lspStdioTransport();
+  const io = transport;
   const server = new ArchonLspServer(io, archonLspHandlers(rt));
   const stop = (): void => {
     try {

@@ -12,6 +12,7 @@
  */
 
 import { buildRuntime } from '../../runtime';
+import type { StreamLike } from './client';
 import { archonReadOnlyTools } from './archon-tools';
 import { McpServer } from './server';
 import { stdioTransport } from './stdio';
@@ -23,10 +24,17 @@ const VERSION = '0.1.0';
  * resolve once the transport closes (parent dropped the pipe or signal
  * caught). The runtime is closed before resolving. Pure orchestration —
  * authority lives in `archonReadOnlyTools` (none, by design).
+ *
+ * `transport` defaults to a real `process.stdin/stdout` adapter; tests pass
+ * a paired PassThrough-backed transport to drive the full boot path without
+ * spawning a child process.
  */
-export async function serveMcpStdio(root: string = process.cwd()): Promise<void> {
+export async function serveMcpStdio(
+  root: string = process.cwd(),
+  transport: StreamLike = stdioTransport(),
+): Promise<void> {
   const rt = await buildRuntime(root);
-  const io = stdioTransport();
+  const io = transport;
   const server = new McpServer(io, {
     name: 'archon',
     version: VERSION,
