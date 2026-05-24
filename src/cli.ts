@@ -16,11 +16,13 @@ const die = (e: unknown): void => {
 
 const [arg] = process.argv.slice(2);
 
-// Two pre-launch entry points — both bypass the interactive surface because
-// neither is a *user* command: `init` scaffolds a fresh repo before the
-// surface can start (policy.yaml doesn't exist yet), `mcp` is an integration
-// transport invoked by another process (Claude Code / Cursor / Codex) over
-// stdio JSON-RPC. Every other CLI argument falls through to the shell/TUI.
+// Three pre-launch entry points — all bypass the interactive surface
+// because none is a *user* command: `init` scaffolds a fresh repo before the
+// surface can start (policy.yaml doesn't exist yet); `mcp`/`lsp` are
+// integration transports invoked by another process (Claude Code / Cursor /
+// Codex over MCP; VS Code / Neovim / JetBrains over LSP) — line-delimited
+// JSON-RPC and Content-Length-framed JSON-RPC respectively. Every other CLI
+// argument falls through to the shell/TUI.
 if (arg === 'init') {
   cmdInit(process.cwd()).catch(die);
 } else if (arg === 'mcp') {
@@ -29,11 +31,17 @@ if (arg === 'init') {
   import('./services/mcp/serve')
     .then(({ serveMcpStdio }) => serveMcpStdio(process.cwd()))
     .catch(die);
+} else if (arg === 'lsp') {
+  // Read-only LSP server over stdio (ADR-0020). Mirror of `archon mcp`
+  // with Content-Length framing per the LSP spec.
+  import('./services/lsp/serve')
+    .then(({ serveLspStdio }) => serveLspStdio(process.cwd()))
+    .catch(die);
 } else {
   if (process.argv.length > 2) {
     console.error(
       'archon: one-shot commands were removed — launching the interactive surface (type /help inside). ' +
-        '(`archon init` scaffolds a fresh repo; `archon mcp` exposes the read-only MCP surface over stdio.)',
+        '(`archon init` scaffolds a fresh repo; `archon mcp` / `archon lsp` expose the read-only surfaces over stdio.)',
     );
   }
   // Full-screen TUI needs a real terminal on both ends; piped/redirected I/O
