@@ -155,4 +155,67 @@ describe('PluginHost.runRetrievers', () => {
     host.register(retriever('ok', ['fs.read'], async () => ['hit']));
     expect(await host.runRetrievers('q', 1)).toEqual(['hit']);
   });
+
+  // ── ABI v1 (M40) ───────────────────────────────────────────────────────────
+  it('registerV1 + listV1 keeps v0 and v1 plugins in separate registries', async () => {
+    const host = new PluginHost(broker());
+    host.register(tool('t', ['fs.read']));
+    host.registerV1({
+      kind: 'event-listener',
+      manifest: { name: 'L', version: '0.0.0', kind: 'event-listener', capabilities: [] },
+      onEvent: () => undefined,
+    });
+    expect(host.list().map((p) => p.manifest.name)).toEqual(['t']);
+    expect(host.listV1().map((p) => p.manifest.name)).toEqual(['L']);
+    expect(host.eventListeners().length).toBe(1);
+    expect(host.workflowSteps().length).toBe(0);
+    expect(host.mcpTools().length).toBe(0);
+  });
+
+  it('duplicate v1 name collides with v0 (the registry is one namespace)', () => {
+    const host = new PluginHost(broker());
+    host.register(tool('dup', ['fs.read']));
+    expect(() =>
+      host.registerV1({
+        kind: 'event-listener',
+        manifest: { name: 'dup', version: '0.0.0', kind: 'event-listener', capabilities: [] },
+        onEvent: () => undefined,
+      }),
+    ).toThrow(/duplicate plugin/);
+  });
+
+  it('attachListeners delivers bus events to event-listener plugins; listener throws are isolated', async () => {
+    const host = new PluginHost(broker());
+    const seen: string[] = [];
+    let badCalls = 0;
+    host.registerV1({
+      kind: 'event-listener',
+      manifest: { name: 'good', version: '0.0.0', kind: 'event-listener', capabilities: [] },
+      onEvent: (e) => {
+        seen.push(e.kind);
+      },
+    });
+    host.registerV1({
+      kind: 'event-listener',
+      manifest: { name: 'bad', version: '0.0.0', kind: 'event-listener', capabilities: [] },
+      onEvent: () => {
+        badCalls++;
+        throw new Error('boom');
+      },
+    });
+    const { createEventBus } = await import('./event-bus');
+    const bus = createEventBus();
+    host.attachListeners(bus);
+    // Subscribers are async-installed — give them a tick.
+    await new Promise((r) => setImmediate(r));
+    bus.publish({ kind: 'turn.start', runId: 'r', at: 1, goal: 'g' });
+    bus.publish({ kind: 'turn.done', runId: 'r', at: 2, ok: true });
+    await new Promise((r) => setImmediate(r));
+    expect(seen).toEqual(['turn.start', 'turn.done']);
+    // The throwing listener should have been INVOKED for each event too —
+    // proving its failures are isolated, not propagated.
+    expect(badCalls).toBe(2);
+    host.dispose();
+    bus.close();
+  });
 });

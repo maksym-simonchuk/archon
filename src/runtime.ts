@@ -24,6 +24,7 @@ import { MemoryStore } from './memory/store';
 import { embedText } from './memory/vector-index';
 import { createPersistedRetriever } from './plugins/builtin/persisted-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
+import { evalsRecorder } from './plugins/builtin/evals';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
 import { extractImports, resolveImport } from './sensing/import-resolver';
@@ -397,10 +398,18 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // Build the host once and load `.archon/plugins/<name>/plugin.mjs` (sibling of
   // the policy file). The dynamic import is host bootstrapping; loaded plugins
   // still receive no authority beyond what the broker grants at call time.
+  // M40 wiring: we additionally (a) register `evalsRecorder` as a built-in v1
+  // event-listener (so a session can be replayed/evaluated without extra
+  // setup) and (b) call `attachListeners(bus)` so v1 listeners start receiving
+  // events the moment the host is built. Listeners observe; they do not gate.
   const pluginHost = (): Promise<PluginHost> =>
     (host ??= (async () => {
       const h = new PluginHost(brokerAt(root));
       await h.load(join(root, dirname(config.paths.policy), 'plugins'));
+      // Built-in event listener: accumulates the session into a buffer that
+      // `evals` / `replay` can drain. Pure observation, no capability needs.
+      h.registerV1(evalsRecorder());
+      h.attachListeners(bus);
       return h;
     })());
 
@@ -412,6 +421,10 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     // Best-effort final flush of any buffered spans. The exporter swallows
     // network errors itself (telemetry must never break the engine).
     if (otel) void otel.stop();
+    // Cancel v1 listener subscriptions (the host hasn't been awaited if we
+    // never called `pluginHost()` — `.then` on the unresolved promise is a
+    // no-op since `host` is undefined). After that, close the bus.
+    void host?.then((h) => h.dispose()).catch(() => undefined);
     // Closes every live subscriber's iterator cleanly (including OTel's).
     // Pending publications never throw, so a producer racing close just drops.
     bus.close();
