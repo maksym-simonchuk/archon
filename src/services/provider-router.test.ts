@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { ModelSpec, TaskClass } from '../core/types';
 import type { ProviderPlugin } from '../plugins/abi';
+import { type ArchonEvent, createEventBus } from './event-bus';
 import { ProviderRouter, type ProviderClient } from './provider-router';
 
 const model = (id: string, provider: string, strengths: TaskClass[], rate = 1): ModelSpec => ({
@@ -153,6 +154,54 @@ describe('ProviderRouter (M7)', () => {
     expect(router.spent).toBe(0); // …so the running total is untouched
   });
 
+  it('accumulates input/output tokens and remembers the last model used', async () => {
+    const router = new ProviderRouter(
+      [model('cheap', 'a', ['plan'], 1), model('strong', 'b', ['reason'], 1)],
+      [client('a'), client('b')],
+    );
+    expect(router.tokensIn).toBe(0);
+    expect(router.tokensOut).toBe(0);
+    expect(router.lastModel).toBeUndefined();
+
+    await router.complete(req('plan', 'one'));
+    expect(router.tokensIn).toBe(1000);
+    expect(router.tokensOut).toBe(1000);
+    expect(router.lastModel).toBe('cheap');
+
+    await router.streamComplete(req('reason', 'two'), () => {});
+    expect(router.tokensIn).toBe(2000);
+    expect(router.tokensOut).toBe(2000);
+    expect(router.lastModel).toBe('strong');
+
+    // A cache hit on a repeated prompt is free of tokens and leaves lastModel intact.
+    await router.complete(req('plan', 'one'));
+    expect(router.tokensIn).toBe(2000);
+    expect(router.lastModel).toBe('strong');
+  });
+
+  it('an aborted stream does not advance the token counters', async () => {
+    const controller = new AbortController();
+    const aborting: ProviderClient = {
+      provider: 'a',
+      complete: () => Promise.reject(new Error('unused')),
+      completeObject: () => Promise.reject(new Error('unused')),
+      completeStream: (_m, _p, _mt, signal) => {
+        async function* gen(): AsyncGenerator<string> {
+          yield 'par';
+          controller.abort();
+          if (signal?.aborted) return;
+          yield 'nope';
+        }
+        return { textStream: gen(), usage: Promise.resolve({ inputTokens: 1000, outputTokens: 1000 }) };
+      },
+    };
+    const router = new ProviderRouter([model('m', 'a', ['summarize'], 1)], [aborting]);
+    await router.streamComplete(req('summarize', 'hi'), () => {}, controller.signal);
+    expect(router.tokensIn).toBe(0);
+    expect(router.tokensOut).toBe(0);
+    expect(router.lastModel).toBeUndefined();
+  });
+
   it('routingTable reports per-model readiness and the resolved per-task chain', () => {
     const router = new ProviderRouter(
       [model('cheap', 'a', ['plan', 'summarize'], 0.5), model('strong', 'b', ['reason', 'diff'], 4)],
@@ -164,6 +213,110 @@ describe('ProviderRouter (M7)', () => {
     expect(routes.find((r) => r.taskClass === 'plan')?.chain).toEqual(['cheap']);
     expect(routes.find((r) => r.taskClass === 'reason')?.chain).toEqual(['strong']);
     expect(routes.find((r) => r.taskClass === 'embed')?.chain).toEqual([]); // nothing serves embed
+  });
+});
+
+describe('ProviderRouter ↔ event bus (Runtime v2 / M25–M26)', () => {
+  it('publishes one token.delta per chunk and a final tokens.usage when a bus is configured', async () => {
+    const bus = createEventBus();
+    const router = new ProviderRouter(
+      [model('m1', 'a', ['summarize'])],
+      [client('a', { tag: 'm1' })],
+      { bus },
+    );
+    // Subscribe before the stream starts so no event is missed.
+    const seen: ArchonEvent[] = [];
+    const sub = bus.subscribe()[Symbol.asyncIterator]();
+    const drain = (async () => {
+      while (true) {
+        const next = await sub.next();
+        if (next.done) break;
+        seen.push(next.value);
+        if (next.value.kind === 'tokens.usage') break; // terminal event for one stream
+      }
+    })();
+
+    const runId = 'run_test_1';
+    const out = await router.streamComplete(req('summarize', 'hi'), () => {}, undefined, runId);
+    await drain;
+
+    const deltas = seen.filter((e) => e.kind === 'token.delta');
+    const usage = seen.find((e) => e.kind === 'tokens.usage');
+    expect(out.text).toBe('m1:streamed');
+    // Two chunks yielded by the fake client → two deltas.
+    expect(deltas).toHaveLength(2);
+    expect(deltas.every((e) => (e as { runId: string }).runId === runId)).toBe(true);
+    expect((deltas[0] as { provider: string }).provider).toBe('a');
+    expect((deltas[0] as { modelId: string }).modelId).toBe('m1');
+    expect(usage).toBeDefined();
+    expect((usage as { usage: { costUsd: number } }).usage.costUsd).toBe(out.costUsd);
+  });
+
+  it('publishes nothing when the stream is aborted (no usage event, no cost)', async () => {
+    const bus = createEventBus();
+    const router = new ProviderRouter(
+      [model('m1', 'a', ['summarize'])],
+      // Slow stream: yield once, then wait on a never-resolving promise so the
+      // abort path is the only termination route.
+      [
+        {
+          provider: 'a',
+          complete: async () => ({ text: 'x', inputTokens: 1, outputTokens: 1 }),
+          completeObject: async (_m, _p, _mt, schema) => ({
+            object: schema.parse({}),
+            inputTokens: 1,
+            outputTokens: 1,
+          }),
+          completeStream: (_m, _p, _mt, signal) => {
+            async function* gen(): AsyncGenerator<string> {
+              yield 'partial';
+              await new Promise<void>((_resolve, reject) => {
+                signal?.addEventListener('abort', () => reject(new Error('aborted')));
+              });
+            }
+            return { textStream: gen(), usage: new Promise(() => {}) }; // usage never resolves
+          },
+        },
+      ],
+      { bus },
+    );
+
+    const controller = new AbortController();
+    const seen: ArchonEvent[] = [];
+    const sub = bus.subscribe()[Symbol.asyncIterator]();
+    const drain = (async () => {
+      // Drain until the bus closes or we've collected the partial.
+      while (true) {
+        const next = await sub.next();
+        if (next.done) break;
+        seen.push(next.value);
+      }
+    })();
+
+    setTimeout(() => controller.abort(), 5);
+    const out = await router.streamComplete(req('summarize', 'p'), () => {}, controller.signal, 'r_abort');
+    bus.close(); // end the drain loop
+    await drain;
+
+    expect(out.aborted).toBe(true);
+    expect(out.costUsd).toBe(0);
+    // We saw at least one delta (the partial) but never a tokens.usage event.
+    expect(seen.some((e) => e.kind === 'token.delta')).toBe(true);
+    expect(seen.some((e) => e.kind === 'tokens.usage')).toBe(false);
+  });
+
+  it('a noisy subscriber cannot break or slow the stream — the bus is observational only', async () => {
+    // Slow subscriber: never reads. The router must still complete.
+    const bus = createEventBus(2); // tiny ring forces drops
+    const router = new ProviderRouter(
+      [model('m1', 'a', ['summarize'])],
+      [client('a', { tag: 'm1' })],
+      { bus },
+    );
+    // Subscribe but never iterate — events will queue and overflow.
+    bus.subscribe();
+    const out = await router.streamComplete(req('summarize', 'hi'), () => {});
+    expect(out.text).toBe('m1:streamed'); // stream completed normally
   });
 });
 

@@ -29,6 +29,18 @@ describe('styleInline', () => {
     expect(styleInline('a * b * c')).toBe('a * b * c');
     expect(styleInline('unterminated `code')).toBe('unterminated `code');
   });
+
+  it('renders [label](url) as an underlined-cyan label and a dim url', () => {
+    const out = styleInline('see [docs](https://archon.dev)');
+    expect(strip(out)).toBe('see docs (https://archon.dev)');
+    expect(out).toContain(`${sgr('4;36')}docs\x1b[0m`);
+    expect(out).toContain(`${sgr('2')}(https://archon.dev)\x1b[0m`);
+  });
+
+  it('leaves an unclosed link literal', () => {
+    expect(styleInline('open [missing](')).toBe('open [missing](');
+    expect(styleInline('open [missing] paren')).toBe('open [missing] paren');
+  });
 });
 
 describe('renderMarkdownLine', () => {
@@ -76,5 +88,22 @@ describe('renderMarkdownLine', () => {
 
   it('does not mangle a code-ish line (globs, multiplication)', () => {
     expect(renderMarkdownLine('matches src/**/*.ts and a * b')).toBe('matches src/**/*.ts and a * b');
+  });
+
+  it('renders a pipe-table data row with dim `│` separators and styled cells', () => {
+    const out = renderMarkdownLine('| Name | Type |');
+    expect(strip(out)).toBe('Name  │  Type');
+    expect(out).toContain(`${sgr('2')}│\x1b[0m`);
+  });
+
+  it('renders the table header rule entirely dim', () => {
+    const out = renderMarkdownLine('| --- | --- |');
+    expect(strip(out)).toBe('| --- | --- |');
+    expect(out).toBe(`${sgr('2')}| --- | --- |\x1b[0m`);
+  });
+
+  it('inline-styles cells inside a table row', () => {
+    const out = renderMarkdownLine('| `add` | sums two numbers |');
+    expect(out).toContain(`${sgr('36')}add\x1b[0m`);
   });
 });

@@ -1,10 +1,23 @@
+import { readdir } from 'node:fs/promises';
 import { emitKeypressEvents } from 'node:readline';
-import { basename, join } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { format } from 'node:util';
 import { loadComputeCore } from './core/compute';
 import { buildRuntime } from './runtime';
-import { fenceLang, highlightTs, isTsLang } from './tui-syntax';
+import { isWatchable } from './sensing/fs-watcher';
+import { applyCompletion, atTokenAtCursor, type AtToken, rankFilesByQuery } from './tui-completion';
+import {
+  bufferLines,
+  cursorRowCol,
+  insertAt,
+  isMultiline,
+  lineEnd as bufLineEnd,
+  lineHome as bufLineHome,
+  moveLineDown,
+  moveLineUp,
+} from './tui-input';
 import { renderMarkdownLine } from './tui-markdown';
+import { fenceLang, highlightDiff, highlightTs, isDiffLang, isTsLang } from './tui-syntax';
 import {
   COMMANDS,
   dispatch,
@@ -35,6 +48,27 @@ import {
 
 const ANSI = /\x1b\[[0-9;]*m/g;
 const ANSI_HEAD = /^\x1b\[[0-9;]*m/;
+
+/**
+ * Compact token count for the header chrome: `<1000` stays a literal integer,
+ * `≥1000` collapses to a single-decimal `k` (so `12 345 → 12.3k`). Keeps the
+ * header a single row even after long sessions.
+ */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return k < 10 ? `${k.toFixed(1)}k` : `${Math.round(k)}k`;
+}
+
+/**
+ * Trim a provider-qualified model id to its last segment for header display:
+ * `anthropic/claude-sonnet-4-6 → claude-sonnet-4-6`, `openai:gpt-4o → gpt-4o`,
+ * bare ids pass through. Pure cosmetic shortener — never used as a routing key.
+ */
+export function shortModel(id: string): string {
+  const i = Math.max(id.lastIndexOf('/'), id.lastIndexOf(':'));
+  return i === -1 ? id : id.slice(i + 1);
+}
 
 /** Visible width of a string, ignoring SGR colour escapes. */
 export function visibleWidth(s: string): number {
@@ -140,10 +174,22 @@ export function editKey(s: InputState, key: Key): InputState {
   }
   if (name === 'left') return cursor > 0 ? { buffer, cursor: cursor - 1 } : s;
   if (name === 'right') return cursor < buffer.length ? { buffer, cursor: cursor + 1 } : s;
-  if (name === 'home' || (key.ctrl && name === 'a')) return { buffer, cursor: 0 };
-  if (name === 'end' || (key.ctrl && name === 'e')) return { buffer, cursor: buffer.length };
-  if (key.ctrl && name === 'u') return { buffer: buffer.slice(cursor), cursor: 0 };
-  if (key.ctrl && name === 'k') return { buffer: buffer.slice(0, cursor), cursor };
+  // Home/End/^A/^E are line-aware so they Do The Right Thing inside a multi-
+  // line composition; for a single-line buffer they collapse to the old
+  // buffer-start/end behaviour because `lineHome` of a buffer with no `\n` is 0
+  // and `lineEnd` is `buffer.length`.
+  if (name === 'home' || (key.ctrl && name === 'a')) return bufLineHome(s);
+  if (name === 'end' || (key.ctrl && name === 'e')) return bufLineEnd(s);
+  if (key.ctrl && name === 'u') {
+    // Kill from the current line's start up to the cursor.
+    const start = bufLineHome(s).cursor;
+    return { buffer: buffer.slice(0, start) + buffer.slice(cursor), cursor: start };
+  }
+  if (key.ctrl && name === 'k') {
+    // Kill from the cursor to the current line's end.
+    const end = bufLineEnd(s).cursor;
+    return { buffer: buffer.slice(0, cursor) + buffer.slice(end), cursor };
+  }
   if (key.ctrl && name === 'w') {
     const left = buffer.slice(0, cursor);
     const m = left.match(/\s*\S+\s*$/);
@@ -236,8 +282,12 @@ const HISTORY_MAX = 1000;
 const MENU_MAX = 6;
 const PROMPT = ' › ';
 const PROMPT_W = 3; // visible width of PROMPT
+const PROMPT_CONT = ' '.repeat(PROMPT_W); // continuation indent for multi-line rows under the prompt
 const SEARCH_PROMPT = ' ⌕ ';
 const SEARCH_PROMPT_W = 3; // visible width of SEARCH_PROMPT
+const MAX_INPUT_ROWS = 10; // cap the input box height; if the buffer exceeds it the window scrolls to keep the cursor visible
+const PASTE_MODE_ON = '\x1b[?2004h';
+const PASTE_MODE_OFF = '\x1b[?2004l';
 /** Menu command column = the longest command, so descriptions stay aligned as it filters. */
 const CMD_COL = Math.max(...COMMANDS.map((c) => c.length));
 const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' } as const;
@@ -345,6 +395,24 @@ export async function startTui(): Promise<void> {
   let armedExit = false; // first ^C on an empty line arms exit; second exits
   let running = true;
 
+  // ── Bracketed paste — terminal wraps a paste in `\x1b[200~ … \x1b[201~`. We
+  //    enable the mode on entry; while it's active a paste is inserted into the
+  //    buffer as one block (newlines stay newlines), so a multi-line snippet
+  //    can't fire N commands by tripping Enter per line.
+  const PASTE_OPEN = '\x1b[200~';
+  const PASTE_CLOSE = '\x1b[201~';
+  let pasting = false;
+  let pasteBuf = '';
+
+  // ── @file Tab-completion menu state (Claude-Code-style mention picker) ───────
+  let atMenu: { matches: string[]; sel: number; token: AtToken } | null = null;
+
+  // ── Project-file index for @file completion — scanned once at startup off
+  //    `rt.root`, filtered to the same source-file set the FS watcher cares
+  //    about (no node_modules / dist / .git noise). The scan kicks off after
+  //    `scheduleRender` is declared below so the closure resolves at fire time.
+  let projectFiles: string[] = [];
+
   // ── Reverse-history search (^R) ───────────────────────────────────────────────
   let searchMode = false;
   let searchQuery = '';
@@ -373,9 +441,34 @@ export async function startTui(): Promise<void> {
     }, 16);
   };
 
+  // Kick off the project-file scan now that `scheduleRender` exists. Node 20.12+
+  // exposes `parentPath` on Dirent; the project targets Node ≥20 so we rely on
+  // it directly.
+  void (async (): Promise<void> => {
+    try {
+      const entries = await readdir(rt.root, { recursive: true, withFileTypes: true });
+      const out: string[] = [];
+      for (const e of entries) {
+        if (!e.isFile()) continue;
+        const rel = relative(rt.root, join(e.parentPath, e.name)).split('\\').join('/');
+        if (isWatchable(rel)) out.push(rel);
+      }
+      out.sort();
+      projectFiles = out;
+      scheduleRender();
+    } catch {
+      // Scan failure is non-fatal — @file completion just falls back to "no matches".
+    }
+  })();
+
   const headerRow = (cols: number): string => {
     const left = ` ${bold('archon')} ${dim('·')} ${basename(rt.root)} `;
-    const right = ` ${rt.config.profile} ${dim('·')} $${rt.router.spent.toFixed(4)} `;
+    // Claude-Code-style token breakdown: last model · ↓input ↑output · $cost.
+    // Compact `k` suffix once a counter passes 1k so the chrome stays a single line.
+    const tokens = `↓${fmtTokens(rt.router.tokensIn)} ↑${fmtTokens(rt.router.tokensOut)}`;
+    const lastModel = rt.router.lastModel;
+    const modelChip = lastModel ? `${dim(shortModel(lastModel))} ${dim('·')} ` : '';
+    const right = ` ${rt.config.profile} ${dim('·')} ${modelChip}${tokens} ${dim('·')} $${rt.router.spent.toFixed(4)} `;
     const gap = Math.max(1, cols - visibleWidth(left) - visibleWidth(right));
     return inverse(clip(left + ' '.repeat(gap) + right, cols));
   };
@@ -415,28 +508,54 @@ export async function startTui(): Promise<void> {
   const statusRow = (cols: number): string =>
     clip(` ${cyan(SPINNER[spinnerFrame])} ${bold(busyLabel)} ${dim(`(${busyStatus()})`)}`, cols);
 
-  const inputContent = (cols: number): { content: string; cursorCol: number } => {
+  // The input box may span multiple rows now (Claude-Code-style multi-line
+  // composition). Row 0 carries the `›` prompt; continuation rows are indented
+  // under it. If the buffer has more lines than `MAX_INPUT_ROWS`, the visible
+  // window slides so the cursor's row stays on screen. Ghost-suggest text from
+  // `suggestLine` is only drawn for a single-line buffer at end-of-buffer.
+  const inputBox = (cols: number): { rows: string[]; cursorRow: number; cursorCol: number } => {
     const innerW = Math.max(0, cols - 2); // floors at 0 so the box never exceeds `cols`
-    const field = Math.max(1, innerW - PROMPT_W); // visible columns for the buffer itself
-    const hscroll = input.cursor > field - 1 ? input.cursor - (field - 1) : 0;
-    const visible = input.buffer.slice(hscroll, hscroll + field);
-    let ghost = '';
-    if (input.cursor === input.buffer.length) {
-      const sug = suggestLine(input.buffer, history);
-      if (sug) {
-        const tail = sug.slice(input.buffer.length);
-        if (visibleWidth(visible) + tail.length < field) ghost = dim(tail);
-      }
+    const field = Math.max(1, innerW - PROMPT_W); // every row has the same writable width (continuations are space-indented)
+    const lines = bufferLines(input.buffer);
+    const { row, col } = cursorRowCol(input.buffer, input.cursor);
+    // Slide the visible window so the cursor row is always inside it.
+    const visibleRows = Math.min(lines.length, MAX_INPUT_ROWS);
+    let winStart = 0;
+    if (lines.length > visibleRows) {
+      winStart = Math.max(0, Math.min(row - visibleRows + 1, lines.length - visibleRows));
+      if (row < winStart) winStart = row;
     }
-    const content = padTo(clip(cyan(PROMPT) + visible + ghost, innerW), innerW);
-    // Clamp inside the borders: col 1 is `│`, col `cols` is the right `│`.
-    const cursorCol = Math.min(1 + PROMPT_W + (input.cursor - hscroll) + 1, Math.max(2, cols - 1));
-    return { content, cursorCol };
+
+    const rows: string[] = [];
+    for (let r = 0; r < visibleRows; r++) {
+      const idx = winStart + r;
+      const prompt = idx === 0 ? cyan(PROMPT) : PROMPT_CONT;
+      const text = lines[idx];
+      // Only the cursor's row scrolls horizontally; other rows render from col 0.
+      const hscroll = idx === row && col > field - 1 ? col - (field - 1) : 0;
+      const visible = text.slice(hscroll, hscroll + field);
+      let ghost = '';
+      if (idx === 0 && lines.length === 1 && input.cursor === input.buffer.length) {
+        const sug = suggestLine(input.buffer, history);
+        if (sug) {
+          const tail = sug.slice(input.buffer.length);
+          if (visibleWidth(visible) + tail.length < field) ghost = dim(tail);
+        }
+      }
+      rows.push(padTo(clip(prompt + visible + ghost, innerW), innerW));
+    }
+
+    // Cursor screen position. The 1+PROMPT_W offset is the column inside the box,
+    // accounting for the `│` border at col 1 and the prompt that occupies cols 2..PROMPT_W+1.
+    const cursorHscroll = col > field - 1 ? col - (field - 1) : 0;
+    const cursorRowInBox = row - winStart;
+    const cursorCol = Math.min(1 + PROMPT_W + (col - cursorHscroll) + 1, Math.max(2, cols - 1));
+    return { rows, cursorRow: cursorRowInBox, cursorCol };
   };
 
   // The search field shown in the box while ^R reverse-search is active: ` ⌕ query`,
-  // amber prompt when the query matches nothing. Cursor trails the query text.
-  const searchContent = (cols: number): { content: string; cursorCol: number } => {
+  // amber prompt when the query matches nothing. Always one row.
+  const searchBox = (cols: number): { rows: string[]; cursorRow: number; cursorCol: number } => {
     const innerW = Math.max(0, cols - 2);
     const field = Math.max(1, innerW - SEARCH_PROMPT_W);
     const hscroll = searchQuery.length > field - 1 ? searchQuery.length - (field - 1) : 0;
@@ -445,7 +564,29 @@ export async function startTui(): Promise<void> {
     const prompt = noMatch ? yellow(SEARCH_PROMPT) : cyan(SEARCH_PROMPT);
     const content = padTo(clip(prompt + visible, innerW), innerW);
     const cursorCol = Math.min(1 + SEARCH_PROMPT_W + (searchQuery.length - hscroll) + 1, Math.max(2, cols - 1));
-    return { content, cursorCol };
+    return { rows: [content], cursorRow: 0, cursorCol };
+  };
+
+  // Picker rows for `@file` Tab-completion — same windowed/overflow-marker
+  // pattern as the slash menu, but shows `@path` entries and the captured token.
+  const atMenuRows = (cols: number): string[] => {
+    const menu = atMenu;
+    if (!menu) return [];
+    const start = menuWindowStart(menu.matches.length, menu.sel, MENU_MAX);
+    const window = menu.matches.slice(start, start + MENU_MAX);
+    return window.map((path, i) => {
+      const abs = start + i;
+      const selected = abs === menu.sel;
+      const marker = selected
+        ? cyan('›')
+        : i === 0 && start > 0
+          ? dim('▲')
+          : i === window.length - 1 && start + window.length < menu.matches.length
+            ? dim('▼')
+            : ' ';
+      const text = selected ? cyan(`@${path}`) : `@${path}`;
+      return clip(`  ${marker} ${text}`, cols);
+    });
   };
 
   // The fuzzy-ranked history matches under the search box (windowed like the menu).
@@ -492,10 +633,13 @@ export async function startTui(): Promise<void> {
     const cols = stdout.columns ?? 80;
     const rows = stdout.rows ?? 24;
 
-    // Rows below the input box: the fuzzy search matches (^R), else the slash menu.
+    // Rows below the input box: fuzzy search matches (^R) win, then the @file
+    // picker, then the slash menu.
     let belowBox: string[];
     if (searchMode) {
       belowBox = searchRows(cols);
+    } else if (atMenu) {
+      belowBox = atMenuRows(cols);
     } else {
       const items = commandMenu(input.buffer);
       if (menuSel >= items.length) menuSel = Math.max(0, items.length - 1);
@@ -504,13 +648,18 @@ export async function startTui(): Promise<void> {
       belowBox = menuRows(cols, menu, menuStart, items.length);
     }
 
-    // Fixed chrome = header(1) + input box(3) + footer(1) = 5 rows, plus the
-    // activity line(1) when busy.
+    // Build the input box rows up front so the variable height feeds into the
+    // height budget. The box itself = box-top(1) + boxRows + box-bottom(1).
+    const box = searchMode ? searchBox(cols) : inputBox(cols);
+    const boxH = 2 + box.rows.length;
+
+    // Fixed chrome = header(1) + box(boxH) + footer(1); plus statusH (activity
+    // line and/or queued-type-ahead preview); plus belowBox.
     const statusH = (busy ? 1 : 0) + (queued !== null ? 1 : 0);
-    let transcriptHeight = rows - 5 - statusH - belowBox.length;
+    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length;
     if (transcriptHeight < 1) {
       belowBox = [];
-      transcriptHeight = Math.max(1, rows - 5 - statusH);
+      transcriptHeight = Math.max(1, rows - 2 - boxH - statusH);
     }
 
     // Transcript display lines (wrapped), then the visible tail. Lines inside a
@@ -520,18 +669,35 @@ export async function startTui(): Promise<void> {
     const logical = pending ? [...transcript, pending] : transcript;
     const wrapped: string[] = [];
     let fenceOpen = false;
-    let fenceHighlight = false;
+    let currentLang = ''; // the lang on the open fence — drives highlighter choice
+    let fenceLineNo = 0; // line counter inside the current fence (resets on open)
     for (let idx = 0; idx < logical.length; idx++) {
       const l = logical[idx];
       let rendered: string;
       const lang = useColor ? fenceLang(l) : undefined;
       if (lang !== undefined) {
+        // Fence boundary. Opening renders as an inverse-video language chip
+        // (` ts `, ` rust `, ` diff `, …); closing renders dim like before.
         fenceOpen = !fenceOpen;
-        fenceHighlight = fenceOpen && isTsLang(lang);
-        rendered = dim(l); // the ``` fence marker itself renders dim
+        if (fenceOpen) {
+          currentLang = lang;
+          fenceLineNo = 0;
+          rendered = inverse(` ${lang || 'code'} `);
+        } else {
+          currentLang = '';
+          rendered = dim(l);
+        }
       } else if (fenceOpen) {
-        // Inside a code fence: highlight TS/JS, leave other languages raw.
-        rendered = fenceHighlight ? highlightTs(l) : l;
+        // Inside a code fence. TS/JS → syntax HL; diff/patch → +/- coloring;
+        // everything else → raw. A dim right-aligned line number prefixes each
+        // line so model-emitted code reads like Claude Code.
+        fenceLineNo++;
+        const code = isTsLang(currentLang)
+          ? highlightTs(l)
+          : isDiffLang(currentLang)
+            ? highlightDiff(l)
+            : l;
+        rendered = `${dim(fenceLineNo.toString().padStart(3))} ${code}`;
       } else {
         // Prose: render the model's plain text as Markdown. renderMarkdownLine
         // no-ops on ANSI-styled lines, so the user-echo, banner and pre-styled
@@ -559,12 +725,12 @@ export async function startTui(): Promise<void> {
     if (busy) frame.push(statusRow(cols));
     if (queued !== null) frame.push(clip(dim(` ⏎ queued — ${queued}`), cols));
 
-    // Framed input box: ╭──╮ / │ › … │ / ╰──╯. The cursor sits on the middle row.
+    // Framed input box: ╭──╮ / │ … │ × boxRows / ╰──╯. The cursor sits on the
+    // box row that matches the buffer's cursor row (Claude-Code multi-line look).
     const span = Math.max(0, cols - 2);
     frame.push(dim(BOX.tl + BOX.h.repeat(span) + BOX.tr));
-    const { content, cursorCol } = searchMode ? searchContent(cols) : inputContent(cols);
-    const inputRowIndex = frame.length; // 0-based index of the input line in `frame`
-    frame.push(dim(BOX.v) + content + dim(BOX.v));
+    const inputContentStart = frame.length; // 0-based index of the FIRST content row
+    for (const r of box.rows) frame.push(dim(BOX.v) + r + dim(BOX.v));
     frame.push(dim(BOX.bl + BOX.h.repeat(span) + BOX.br));
 
     for (const m of belowBox) frame.push(m);
@@ -578,7 +744,10 @@ export async function startTui(): Promise<void> {
     }
     out += '\x1b[J';
     // The input stays live during a turn (type-ahead), so show the cursor too.
-    if (cursorCol > 0) out += `\x1b[${inputRowIndex + 1};${cursorCol}H${SHOW_CURSOR}`;
+    if (box.cursorCol > 0) {
+      const cursorScreenRow = inputContentStart + box.cursorRow + 1; // +1 = 1-based terminal rows
+      out += `\x1b[${cursorScreenRow};${box.cursorCol}H${SHOW_CURSOR}`;
+    }
     realWrite(out);
   };
 
@@ -636,6 +805,42 @@ export async function startTui(): Promise<void> {
   // ── Key handling ──────────────────────────────────────────────────────────────
   const onKey = (_str: string | undefined, key: Key | undefined): void => {
     if (!key) return;
+
+    // Bracketed paste — the terminal wraps a paste in `\x1b[200~ … \x1b[201~`.
+    // We funnel the whole paste into the buffer as one insertion, so multi-line
+    // content can't fire N commands by tripping Enter per line. Handle the
+    // case where the whole paste arrives in one event AND the case where it
+    // streams as many small keypresses with the markers split off.
+    const seq = key.sequence ?? '';
+    if (pasting) {
+      const close = seq.indexOf(PASTE_CLOSE);
+      if (close !== -1) {
+        pasteBuf += seq.slice(0, close);
+        input = insertAt(input, pasteBuf);
+        pasting = false;
+        pasteBuf = '';
+        atMenu = null;
+        render();
+        return;
+      }
+      // Inside a paste, Enter/Return is a literal newline, not a submit.
+      if (key.name === 'return' || key.name === 'enter') pasteBuf += '\n';
+      else pasteBuf += seq;
+      return;
+    }
+    if (seq.startsWith(PASTE_OPEN)) {
+      const rest = seq.slice(PASTE_OPEN.length);
+      const close = rest.indexOf(PASTE_CLOSE);
+      if (close !== -1) {
+        input = insertAt(input, rest.slice(0, close));
+        atMenu = null;
+        render();
+      } else {
+        pasting = true;
+        pasteBuf = rest;
+      }
+      return;
+    }
 
     // Reverse-history search owns every key while active.
     if (searchMode) {
@@ -741,6 +946,32 @@ export async function startTui(): Promise<void> {
       return;
     }
 
+    // @file completion menu owns Tab/Up/Down/Enter/Esc while it's open. Any
+    // other key dismisses it and falls through, so typing extends the buffer
+    // normally.
+    if (atMenu) {
+      if (key.name === 'escape') { atMenu = null; render(); return; }
+      if (key.name === 'tab' || key.name === 'down') {
+        atMenu = { ...atMenu, sel: (atMenu.sel + 1) % atMenu.matches.length };
+        render();
+        return;
+      }
+      if (key.name === 'up') {
+        atMenu = { ...atMenu, sel: (atMenu.sel - 1 + atMenu.matches.length) % atMenu.matches.length };
+        render();
+        return;
+      }
+      if (key.name === 'return' || key.name === 'enter') {
+        const picked = atMenu.matches[atMenu.sel];
+        const next = applyCompletion(input.buffer, atMenu.token, picked);
+        input = next;
+        atMenu = null;
+        render();
+        return;
+      }
+      atMenu = null; // any other key — dismiss and let it process below
+    }
+
     // ^R — enter reverse-history search (fuzzy, ranked in the Rust core).
     if (key.ctrl && key.name === 'r') {
       if (history.length > 0) enterSearch();
@@ -763,6 +994,24 @@ export async function startTui(): Promise<void> {
     const menuActive = items.length > 0;
 
     if (key.name === 'return' || key.name === 'enter') {
+      // Alt+Enter inserts a newline (multi-line composition) — emitKeypressEvents
+      // flags this with `key.meta`.
+      if (key.meta) {
+        input = insertAt(input, '\n');
+        render();
+        return;
+      }
+      // `\`+Enter at the cursor is the fallback newline shortcut for terminals
+      // that don't propagate Alt+Enter (Claude-Code convention). It replaces the
+      // trailing `\` with `\n`.
+      if (input.cursor > 0 && input.buffer[input.cursor - 1] === '\\') {
+        input = {
+          buffer: input.buffer.slice(0, input.cursor - 1) + '\n' + input.buffer.slice(input.cursor),
+          cursor: input.cursor, // 1-char replaced with 1-char
+        };
+        render();
+        return;
+      }
       // On the menu, Enter first completes to the highlighted command; a second
       // Enter (now an exact match) submits — so a partial command never runs.
       if (menuActive && items[menuSel] !== undefined && items[menuSel] !== input.buffer) {
@@ -778,6 +1027,17 @@ export async function startTui(): Promise<void> {
     }
 
     if (key.name === 'tab') {
+      // @file completion has priority — when the cursor sits inside an `@token`
+      // and the project scan has finished, open the picker (Claude-Code-style).
+      const token = atTokenAtCursor(input.buffer, input.cursor);
+      if (token && projectFiles.length > 0) {
+        const matches = rankFilesByQuery(token.query, projectFiles, 30);
+        if (matches.length > 0) {
+          atMenu = { matches, sel: 0, token };
+          render();
+          return;
+        }
+      }
       if (menuActive) {
         const pick = items[menuSel] ?? items[0];
         input = { buffer: pick, cursor: pick.length };
@@ -787,15 +1047,18 @@ export async function startTui(): Promise<void> {
       return;
     }
 
-    // Up/Down drive the menu when it's open, else history.
+    // Up/Down: drive the slash menu when it's open, navigate rows inside a
+    // multi-line buffer when there is one, otherwise step through history.
     if (key.name === 'up') {
       if (menuActive) menuSel = (menuSel - 1 + items.length) % items.length;
+      else if (isMultiline(input.buffer)) input = moveLineUp(input);
       else historyPrev();
       render();
       return;
     }
     if (key.name === 'down') {
       if (menuActive) menuSel = (menuSel + 1) % items.length;
+      else if (isMultiline(input.buffer)) input = moveLineDown(input);
       else historyNext();
       render();
       return;
@@ -856,13 +1119,13 @@ export async function startTui(): Promise<void> {
     if (stdin.isTTY) stdin.setRawMode(false);
     stdin.pause();
     restoreCapture();
-    realWrite(`${SHOW_CURSOR}${LEAVE_ALT}`);
+    realWrite(`${PASTE_MODE_OFF}${SHOW_CURSOR}${LEAVE_ALT}`);
     rt.close();
     saveHistory(historyFile, history);
   };
 
   return new Promise<void>((resolve) => {
-    realWrite(`${ENTER_ALT}${HIDE_CURSOR}`);
+    realWrite(`${ENTER_ALT}${HIDE_CURSOR}${PASTE_MODE_ON}`);
     installCapture();
     emitKeypressEvents(stdin);
     if (stdin.isTTY) stdin.setRawMode(true);

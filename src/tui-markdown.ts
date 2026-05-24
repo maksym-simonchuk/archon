@@ -2,8 +2,8 @@
  * Zero-dependency Markdown line renderer for the TUI transcript — the
  * Claude-Code-style prose rendering of `/ask` answers. Where `tui-syntax`
  * colours the inside of ``` fenced code blocks, this module renders the prose
- * *around* them: ATX headings, **bold**, `inline code`, bullet/numbered lists,
- * block quotes and horizontal rules.
+ * *around* them: ATX headings, **bold**, `inline code`, [links](urls),
+ * pipe-tables, bullet/numbered lists, block quotes and horizontal rules.
  *
  * It works one line at a time because the TUI transcript is a flat array of
  * lines. Two guards keep it safe to run over the whole transcript:
@@ -28,6 +28,7 @@ const DIM = '2';
 const HEADING = '1;36'; // bold cyan
 const CODE = '36'; // cyan — inline `code`
 const RULE = '2'; // dim — horizontal rule glyph
+const LINK = '4;36'; // underlined cyan — [label](url)
 
 /**
  * Style the inline spans of a single text run: `code` (backticks dropped, the
@@ -36,7 +37,7 @@ const RULE = '2'; // dim — horizontal rule glyph
  * when it contains no inline markup.
  */
 export function styleInline(text: string): string {
-  if (!text.includes('`') && !text.includes('**')) return text;
+  if (!text.includes('`') && !text.includes('**') && !text.includes('](')) return text;
   let out = '';
   let i = 0;
   const n = text.length;
@@ -60,6 +61,21 @@ export function styleInline(text: string): string {
         continue;
       }
     }
+    // [label](url) — underlined cyan label, dim url in parens (terminals can't
+    // make a link clickable here, so the url is preserved alongside the label).
+    if (ch === '[') {
+      const closeBracket = text.indexOf(']', i + 1);
+      if (closeBracket !== -1 && text[closeBracket + 1] === '(') {
+        const closeParen = text.indexOf(')', closeBracket + 2);
+        if (closeParen !== -1) {
+          const label = text.slice(i + 1, closeBracket);
+          const url = text.slice(closeBracket + 2, closeParen);
+          out += `${wrap(LINK, label)} ${wrap(DIM, `(${url})`)}`;
+          i = closeParen + 1;
+          continue;
+        }
+      }
+    }
     out += ch;
     i++;
   }
@@ -71,6 +87,8 @@ const HEADING_RE = /^(#{1,6})\s+(.*)$/;
 const QUOTE_RE = /^(\s*)>\s?(.*)$/;
 const BULLET_RE = /^(\s*)[-*+]\s+(.*)$/;
 const NUM_RE = /^(\s*)(\d{1,9}[.)])\s+(.*)$/;
+const TABLE_ROW = /^\s*\|/; // a row starts with `|` (the common pipe-table form)
+const TABLE_SEP = /^[\s|:-]+$/; // the `| --- | :--: |` header rule: only pipes, dashes, colons, spaces
 
 /**
  * Render one Markdown line to a styled terminal line. Block constructs
@@ -80,6 +98,17 @@ const NUM_RE = /^(\s*)(\d{1,9}[.)])\s+(.*)$/;
  */
 export function renderMarkdownLine(line: string): string {
   if (line === '' || ANSI.test(line)) return line;
+
+  // Pipe-tables render row-by-row: dim the header rule, otherwise drop the
+  // pipes for nice `│` separators and inline-style each cell.
+  if (TABLE_ROW.test(line)) {
+    const trimmed = line.trim();
+    if (TABLE_SEP.test(trimmed)) return wrap(DIM, trimmed);
+    const raw = line.split('|').map((c) => c.trim());
+    // Leading/trailing empty cells appear when the row begins/ends with `|`.
+    const cells = raw.filter((c, idx, arr) => !(c === '' && (idx === 0 || idx === arr.length - 1)));
+    return cells.map((c) => styleInline(c)).join(`  ${wrap(DIM, '│')}  `);
+  }
 
   if (HR.test(line)) return wrap(RULE, '─'.repeat(Math.max(3, line.trim().length)));
 

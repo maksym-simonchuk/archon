@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fenceLang, highlightTs, isTsLang } from './tui-syntax';
+import { fenceLang, highlightDiff, highlightTs, isDiffLang, isTsLang } from './tui-syntax';
 
 // eslint-disable-next-line no-control-regex
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
@@ -81,5 +81,29 @@ describe('isTsLang', () => {
 
   it('rejects other languages and the empty (no-lang) fence', () => {
     for (const l of ['', 'python', 'rust', 'json', 'bash']) expect(isTsLang(l)).toBe(false);
+  });
+});
+
+describe('highlightDiff', () => {
+  it('colours added lines green, removed lines red', () => {
+    expect(highlightDiff('+ added')).toContain(`${sgr('32')}+ added`);
+    expect(highlightDiff('- removed')).toContain(`${sgr('31')}- removed`);
+  });
+
+  it('bolds file headers and cyans hunk headers', () => {
+    expect(highlightDiff('+++ b/file.ts')).toContain(`${sgr('1')}+++ b/file.ts`);
+    expect(highlightDiff('--- a/file.ts')).toContain(`${sgr('1')}--- a/file.ts`);
+    expect(highlightDiff('@@ -1,3 +1,4 @@')).toContain(`${sgr('36')}@@ -1,3 +1,4 @@`);
+  });
+
+  it('dims context lines (no leading +/-)', () => {
+    expect(highlightDiff(' unchanged')).toContain(`${sgr('2')} unchanged`);
+  });
+});
+
+describe('isDiffLang', () => {
+  it('matches diff/patch case-insensitively', () => {
+    for (const l of ['diff', 'DIFF', 'patch']) expect(isDiffLang(l)).toBe(true);
+    for (const l of ['ts', 'rust', '']) expect(isDiffLang(l)).toBe(false);
   });
 });

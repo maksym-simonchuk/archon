@@ -3,8 +3,10 @@ import {
   clip,
   commandMenu,
   editKey,
+  fmtTokens,
   type InputState,
   menuWindowStart,
+  shortModel,
   tailLines,
   visibleWidth,
   wrapLine,
@@ -115,5 +117,31 @@ describe('commandMenu', () => {
     expect(commandMenu('/plan add x')).toEqual([]);
     expect(commandMenu('add a greeter')).toEqual([]);
     expect(commandMenu('/zzz')).toEqual([]);
+  });
+});
+
+describe('fmtTokens', () => {
+  it('returns the integer below 1k', () => {
+    expect(fmtTokens(0)).toBe('0');
+    expect(fmtTokens(42)).toBe('42');
+    expect(fmtTokens(999)).toBe('999');
+  });
+  it('collapses to one-decimal k below 10k, integer k above', () => {
+    expect(fmtTokens(1000)).toBe('1.0k');
+    expect(fmtTokens(1250)).toBe('1.3k'); // toFixed rounds 1.25 → 1.3
+    expect(fmtTokens(9499)).toBe('9.5k');
+    expect(fmtTokens(12_345)).toBe('12k');
+    expect(fmtTokens(99_999)).toBe('100k');
+  });
+});
+
+describe('shortModel', () => {
+  it('returns the last segment after `/` or `:`', () => {
+    expect(shortModel('anthropic/claude-sonnet-4-6')).toBe('claude-sonnet-4-6');
+    expect(shortModel('openai:gpt-4o')).toBe('gpt-4o');
+  });
+  it('passes a bare id through unchanged', () => {
+    expect(shortModel('cheap')).toBe('cheap');
+    expect(shortModel('')).toBe('');
   });
 });

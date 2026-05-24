@@ -123,3 +123,24 @@ const TS_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'javascript', 
 export function isTsLang(lang: string): boolean {
   return TS_LANGS.has(lang.toLowerCase());
 }
+
+const DIFF_LANGS = new Set(['diff', 'patch']);
+
+/** Whether a fence language should be highlighted by the diff line colourer. */
+export function isDiffLang(lang: string): boolean {
+  return DIFF_LANGS.has(lang.toLowerCase());
+}
+
+/**
+ * Colour one line of a unified diff: green for additions, red for deletions,
+ * bold for the `+++/---` file headers, cyan for `@@` hunk headers, and dim
+ * for the surrounding context. Single pass per line so it composes with the
+ * TUI's line-by-line render loop just like `highlightTs`.
+ */
+export function highlightDiff(line: string): string {
+  if (line.startsWith('+++') || line.startsWith('---')) return paint('1', line); // bold file header
+  if (line.startsWith('@@')) return paint('36', line); // cyan hunk header
+  if (line.startsWith('+')) return paint('32', line); // green addition
+  if (line.startsWith('-')) return paint('31', line); // red deletion
+  return paint('2', line); // dim context
+}

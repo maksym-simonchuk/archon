@@ -1,6 +1,7 @@
 import type { ZodType } from 'zod';
 import { type Completion, type ModelSpec, type RouteRequest, type TaskClass, TASK_CLASSES } from '../core/types';
 import type { ProviderPlugin } from '../plugins/abi';
+import type { EventBus } from './event-bus';
 
 /** A model in the registry plus whether a client backs it — read-only introspection. */
 export interface ModelInfo {
@@ -70,6 +71,15 @@ export interface RouterOptions {
    * first use, so plugins load only when actually needed. See ADR-0012.
    */
   providerPlugins?: () => Promise<ProviderPlugin[]>;
+  /**
+   * Runtime v2 event bus (see `docs/RUNTIME-V2.md` §4.1). When present,
+   * `streamComplete` publishes per-token `token.delta` events and a final
+   * `tokens.usage` summary so the TUI / replay / OTel surfaces can render
+   * cost and progress without coupling to the router. Optional — callers
+   * still receive identical return values; bus integration is purely
+   * additive. See ADR-0013, ADR-0015.
+   */
+  bus?: EventBus;
 }
 
 const dedupe = (xs: string[]): string[] => [...new Set(xs)];
@@ -85,6 +95,9 @@ export class ProviderRouter {
   private readonly clients: Map<string, ProviderClient>;
   private readonly cache = new Map<string, Completion>();
   private spentUsd = 0;
+  private tokensInTotal = 0;
+  private tokensOutTotal = 0;
+  private lastModelId: string | undefined;
   private pluginCache?: ProviderPlugin[]; // memoized provider-plugin fallback list
 
   constructor(
@@ -99,6 +112,21 @@ export class ProviderRouter {
   /** Total cost charged so far (sum of non-cached completions). */
   get spent(): number {
     return this.spentUsd;
+  }
+
+  /** Cumulative input tokens across all non-aborted, non-cached calls. */
+  get tokensIn(): number {
+    return this.tokensInTotal;
+  }
+
+  /** Cumulative output tokens across all non-aborted, non-cached calls. */
+  get tokensOut(): number {
+    return this.tokensOutTotal;
+  }
+
+  /** Model id used by the most recent successful call, or `undefined` if none yet. */
+  get lastModel(): string | undefined {
+    return this.lastModelId;
   }
 
   /**
@@ -177,6 +205,9 @@ export class ProviderRouter {
       try {
         const c = await plugin.complete(req);
         this.spentUsd += c.costUsd;
+        this.tokensInTotal += c.inputTokens;
+        this.tokensOutTotal += c.outputTokens;
+        this.lastModelId = c.modelId;
         return { ...c, cached: false };
       } catch {
         // this plugin failed — fall through to the next
@@ -226,8 +257,19 @@ export class ProviderRouter {
     req: RouteRequest,
     onChunk: (text: string) => void,
     signal?: AbortSignal,
+    /**
+     * Optional v2 correlation id. When the router has a bus, this id stamps
+     * every published event so a subscriber can group tokens by turn / agent
+     * call. If omitted but a bus is configured, the router synthesises one —
+     * but callers should pass their own so events tie to the surrounding turn.
+     */
+    runId?: string,
   ): Promise<{ modelId: string; text: string; costUsd: number; aborted: boolean }> {
     this.budgetGuard();
+    const bus = this.opts.bus;
+    // Synthesise a runId only when a bus is configured — avoids touching
+    // `crypto` on the hot path when nobody's listening.
+    const rid = bus ? (runId ?? `run_${Date.now().toString(36)}`) : '';
     for (const modelId of this.routeChain(req.taskClass)) {
       const model = this.models.get(modelId);
       const client = model && this.clients.get(model.provider);
@@ -239,6 +281,16 @@ export class ProviderRouter {
         for await (const chunk of textStream) {
           text += chunk;
           onChunk(chunk);
+          // Bus is purely observational — never gates the stream, never throws.
+          // Per ADR-0015 a misbehaving subscriber must not break the engine.
+          bus?.publish({
+            kind: 'token.delta',
+            runId: rid,
+            at: Date.now(),
+            provider: model.provider,
+            modelId,
+            text: chunk,
+          });
         }
       } catch (e) {
         if (signal?.aborted) aborted = true; // cancellation surfaced as a throw
@@ -251,6 +303,17 @@ export class ProviderRouter {
         costUsd =
           (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
         this.spentUsd += costUsd;
+        this.tokensInTotal += inputTokens;
+        this.tokensOutTotal += outputTokens;
+        this.lastModelId = modelId;
+        bus?.publish({
+          kind: 'tokens.usage',
+          runId: rid,
+          at: Date.now(),
+          provider: model.provider,
+          modelId,
+          usage: { inputTokens, outputTokens, costUsd },
+        });
       }
       return { modelId, text, costUsd, aborted };
     }
@@ -284,6 +347,9 @@ export class ProviderRouter {
         const costUsd =
           (inputTokens / 1000) * model.costPer1kInput + (outputTokens / 1000) * model.costPer1kOutput;
         this.spentUsd += costUsd;
+        this.tokensInTotal += inputTokens;
+        this.tokensOutTotal += outputTokens;
+        this.lastModelId = modelId;
         return { value, modelId, inputTokens, outputTokens, costUsd };
       } catch (e) {
         lastError = e; // provider failed — fall through to the next in the chain
