@@ -168,7 +168,7 @@ const SHELL_HELP = `commands:
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
   /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
-  /mcp [list|check <server>:<tool>]  list configured MCP grants · check authorizeV2 (M30)
+  /mcp [list|tools|check <server>:<tool>]  list grants · tools: read-only surface Archon exposes (M30/M31)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -278,7 +278,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
-  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp check'];
+  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp tools', '/mcp check'];
   if (head === '/replay' && words.length === 2) return ['/replay --live', '/replay --speed'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
@@ -871,12 +871,21 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       return true;
     }
     case '/mcp': {
-      // Inspect the v2 MCP authorization surface (M30). Read-only: lists the
-      // policy allowlist (default empty) and lets the user dry-run an
-      // authorizeV2 check before they wire an actual server.
+      // Inspect the v2 MCP authorization surface (M30) and the read-only tools
+      // Archon exposes to inbound MCP clients (M31). All read-only — `tools`
+      // lists the bound surface; `list`/`status` shows the policy allowlist;
+      // `check` dry-runs `authorizeV2(mcp:<server>:<tool>)`.
       const words = arg.trim().split(/\s+/).filter(Boolean);
       const sub = words[0] ?? 'list';
       const policy = rt.policy();
+      if (sub === 'tools') {
+        const { archonReadOnlyTools } = await import('./services/mcp/archon-tools');
+        const tools = archonReadOnlyTools(rt);
+        console.log(bold(`archon read-only tools (${tools.length})`));
+        for (const t of tools) console.log(`  ${cyan(t.desc.name)}  ${dim(t.desc.description ?? '')}`);
+        console.log(dim('every tool is mutating=false; mutating tools require explicit mutatingEnabled per ADR-0015'));
+        return true;
+      }
       if (sub === 'list' || sub === 'status') {
         const allow = policy.v2Allowlist('mcp');
         if (allow.length === 0) {
@@ -906,7 +915,7 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         console.log(`${target}: ${verdict === 'allow' ? cyan('allow') : 'deny'}`);
         return true;
       }
-      console.log('usage: /mcp [list|check <server>:<tool>]');
+      console.log('usage: /mcp [list|tools|check <server>:<tool>]');
       return true;
     }
     case '/spec': {
