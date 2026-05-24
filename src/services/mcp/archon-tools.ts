@@ -25,7 +25,7 @@ import type { McpCallToolResult, McpToolDescription } from './protocol';
 import type { ServerTool } from './server';
 
 /** Pure result type for the blast-radius tool. */
-interface BlastRadiusOutput {
+export interface BlastRadiusOutput {
   target: string;
   seeds: string[];
   dependents: string[];
@@ -34,7 +34,7 @@ interface BlastRadiusOutput {
 }
 
 /** Pure result type for the explain tool. */
-interface ExplainOutput {
+export interface ExplainOutput {
   query: string;
   resolved: string | null;
   kind: string | null;
@@ -116,7 +116,7 @@ const MAP_DESC: McpToolDescription = {
 };
 
 /** Compute the blast-radius report for a target. Pure beyond the IndexStore read. */
-async function computeBlastRadius(rt: Runtime, target: string): Promise<BlastRadiusOutput> {
+export async function computeBlastRadius(rt: Runtime, target: string): Promise<BlastRadiusOutput> {
   const empty: BlastRadiusOutput = { target, seeds: [], dependents: [], files: [], indexed: false };
   return withIndex(
     rt,
@@ -137,7 +137,7 @@ async function computeBlastRadius(rt: Runtime, target: string): Promise<BlastRad
 }
 
 /** Compute the explain report for a query. Pure beyond the IndexStore read. */
-function computeExplain(rt: Runtime, query: string): ExplainOutput {
+export function computeExplain(rt: Runtime, query: string): ExplainOutput {
   const empty = (candidates: string[] = []): ExplainOutput => ({
     query,
     resolved: null,
@@ -173,7 +173,7 @@ function computeExplain(rt: Runtime, query: string): ExplainOutput {
 }
 
 /** Compute the violations report. Pure beyond the IndexStore read. */
-function computeViolations(rt: Runtime): ReturnType<typeof detectViolations> {
+export function computeViolations(rt: Runtime): ReturnType<typeof detectViolations> {
   const emptyReport = {
     violations: [],
     healthScore: 100,
