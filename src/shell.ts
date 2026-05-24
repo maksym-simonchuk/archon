@@ -67,8 +67,20 @@ export interface ShellSession {
    * one turn can be grouped (and replayed) together. Undefined between turns.
    */
   currentRunId?: string;
+  /**
+   * Reasoning visibility mode for this session (M28). `off` (default) hides
+   * model reasoning; `summary` shows the deterministic compress of structured
+   * ReasoningNode events; `trace` shows the full structured trail. NEVER the
+   * provider's raw chain-of-thought — that boundary is in `cognition/reasoning.ts`.
+   * Controlled by `/think off|summary|trace`.
+   */
+  reasoningMode: 'off' | 'summary' | 'trace';
 }
-export const newSession = (): ShellSession => ({ askHistory: [], watchDirty: new Set() });
+export const newSession = (): ShellSession => ({
+  askHistory: [],
+  watchDirty: new Set(),
+  reasoningMode: 'off',
+});
 
 /** Every slash command the shell understands — drives tab-completion (and the TUI slash menu). */
 export const COMMANDS = [
@@ -99,6 +111,7 @@ export const COMMANDS = [
   '/recap',
   '/cost',
   '/model',
+  '/think',
   '/doctor',
   '/memory',
   '/promote',
@@ -141,6 +154,7 @@ const SHELL_HELP = `commands:
   /recap            per-run digest of recent activity + health trend
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
+  /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -205,6 +219,7 @@ function argCandidates(head: string, words: string[]): string[] {
       return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
+  if (head === '/think' && words.length === 2) return ['/think off', '/think summary', '/think trace'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -431,6 +446,22 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/model':
       await cmdModel(rt);
       return true;
+    case '/think': {
+      // Reasoning visibility toggle (M28). `/think` with no arg shows the
+      // current mode; `/think off|summary|trace` updates it. NEVER shows
+      // raw model CoT — the renderer in cognition/reasoning.ts only formats
+      // structured ReasoningNode events Archon itself emits.
+      const next = arg.trim();
+      if (next === '') {
+        console.log(`think mode: ${session.reasoningMode}`);
+      } else if (next === 'off' || next === 'summary' || next === 'trace') {
+        session.reasoningMode = next;
+        console.log(`think mode: ${next}`);
+      } else {
+        console.log('usage: /think [off|summary|trace]');
+      }
+      return true;
+    }
     case '/doctor':
       await cmdDoctor(rt);
       return true;

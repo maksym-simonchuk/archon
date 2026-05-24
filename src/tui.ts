@@ -249,6 +249,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/status': 'task journal (· taskId for replay)',
   '/recap': 'per-run digest + health trend',
   '/cost': 'session spend vs budget',
+  '/think': 'reasoning visibility off|summary|trace (never raw CoT)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',

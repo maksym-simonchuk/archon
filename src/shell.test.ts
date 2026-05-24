@@ -274,6 +274,31 @@ describe('shell dispatch', () => {
       rt.close();
     }
   });
+
+  it('/think toggles reasoning visibility on the session (M28)', async () => {
+    const rt = await runtime();
+    const session = newSession();
+    const log = captured();
+    try {
+      // No-arg shows the current mode (default off).
+      await dispatch(rt, '/think', session);
+      expect(text(log)).toContain('think mode: off');
+      log.mockClear();
+
+      // Valid mode updates the session.
+      await dispatch(rt, '/think summary', session);
+      expect(session.reasoningMode).toBe('summary');
+      expect(text(log)).toContain('think mode: summary');
+      log.mockClear();
+
+      // Invalid mode is rejected and the session is left untouched.
+      await dispatch(rt, '/think loud', session);
+      expect(session.reasoningMode).toBe('summary');
+      expect(text(log)).toContain('usage: /think');
+    } finally {
+      rt.close();
+    }
+  });
 });
 
 describe('shell conversational /ask', () => {
