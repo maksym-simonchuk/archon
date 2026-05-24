@@ -1629,12 +1629,35 @@ export interface DoctorReport {
   health: { score: number; high: number; medium: number; low: number; trend: number | null } | null;
   /** Temporal evolution forecast (M15), or null when there is no index. */
   evolution: { commitsAnalyzed: number; godTrending: number; topHotspot: string | null } | null;
+  /**
+   * Outbound / inbound integration surfaces (M30/M31/M39, ADR-0020). Read-only
+   * status: how many MCP servers are configured outbound (mcp.yaml), what
+   * Archon exposes inbound (read-only tool count, LSP methods), and whether
+   * each surface has a non-empty grant in policy.yaml — so the user can
+   * verify configured ≠ authorized before wiring an editor or client.
+   */
+  integrations: {
+    mcpOutbound: { configured: number; grants: number };
+    mcpInbound: { tools: number };
+    lspInbound: { methods: number };
+  };
 }
 
 export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Promise<void> {
   const { config } = rt;
   const present = (rel: string): boolean => existsSync(join(rt.root, rel));
   const arch = await assessArchitecture(rt);
+  const { archonReadOnlyTools } = await import('./services/mcp/archon-tools');
+  const integrations = {
+    mcpOutbound: {
+      configured: rt.mcp.servers.length,
+      grants: rt.policy().v2Allowlist('mcp').length,
+    },
+    mcpInbound: { tools: archonReadOnlyTools(rt).length },
+    // archon-lsp dispatches 3 read-only methods plus a parallel executeCommand
+    // allowlist (ADR-0020) — count matches `/lsp list`.
+    lspInbound: { methods: 3 },
+  };
   const report: DoctorReport = {
     root: rt.root,
     node: process.version,
@@ -1652,6 +1675,7 @@ export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Pro
       journal: present(config.paths.journal),
     },
     plugins: (await rt.pluginHost()).list().length,
+    integrations,
     health: arch.health,
     evolution: arch.evolution,
   };
@@ -1686,6 +1710,13 @@ export async function cmdDoctor(rt: Runtime, opts: { json?: boolean } = {}): Pro
   console.log(`    - journal: ${mark(report.state.journal)}`);
 
   console.log(`  plugins:   ${report.plugins} loaded`);
+
+  // Integration surfaces (M30/M31/M39, ADR-0020). *Configured ≠ authorized*:
+  // an mcp.yaml entry only takes effect once a matching mcp:* grant is added
+  // to policy.yaml, so the line shows both numbers side-by-side.
+  const mcpOut = report.integrations.mcpOutbound;
+  console.log(`  mcp:       ${mcpOut.configured} outbound configured · ${mcpOut.grants} grant(s) · ${report.integrations.mcpInbound.tools} inbound tools`);
+  console.log(`  lsp:       ${report.integrations.lspInbound.methods} methods exposed (read-only)`);
 
   if (report.health === null) {
     console.log('  health:    no index — run `archon index` for an architecture-health score');
