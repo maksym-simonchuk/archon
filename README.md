@@ -64,4 +64,34 @@ npm run build:wasm
 - **No full-repo rescans**; context is **compressed, not ingested** (ADR-0005, ADR-0006).
 - Risky work runs in an isolated **git worktree**; git is the undo log (ADR-0004).
 - Hot CPU paths live in the **Rust/WASM core**, which has no I/O access (ADR-0011).
+
+## Editor / agent integration (M30/M31/M39)
+
+Archon exposes the same read-only intelligence surface over **two open
+standards** — MCP for agents, LSP for editors. Both are *read-only by default*
+(ADR-0015 #9 + ADR-0020); mutating tools require an explicit `--mutating`
+opt-in that the entry points below do not take. *Configured ≠ authorized*:
+adding a server to `mcp.yaml` is not enough on its own — outbound MCP calls
+also need a matching `mcp:*` grant in `.archon/policy.yaml`.
+
+| Surface | Command | Wire | Methods |
+| --- | --- | --- | --- |
+| **MCP server** (inbound — Claude Code, Cursor, Codex talk to Archon) | `archon mcp` | line-delimited JSON-RPC over stdio | `archon.blastRadius` · `archon.explain` · `archon.violations` · `archon.map` |
+| **MCP client** (outbound — Archon calls other MCP servers) | configure in `.archon/mcp.yaml` + grant `mcp:<server>:<tool>` in policy | line-delimited JSON-RPC over stdio | depends on the server |
+| **LSP server** (inbound — VS Code, Neovim, JetBrains talk to Archon) | `archon lsp` | Content-Length-framed JSON-RPC over stdio | `archon/blastRadius` · `archon/explain` · `archon/violations` + `workspace/executeCommand` |
+
+Inspect the surfaces interactively from the TUI:
+
+```text
+/mcp list           # policy grants per namespace (default-deny)
+/mcp tools          # the inbound read-only surface (4 tools)
+/mcp servers        # outbound servers configured in .archon/mcp.yaml
+/mcp check claude-code:tools/list   # dry-run authorize a capability
+/lsp list           # the LSP method surface
+/lsp blast src/x.ts # what would the editor see for this file
+```
+
+`archon doctor` summarises the same numbers in one line — both inbound counts
+and how many policy grants exist for the outbound side — so you can confirm
+the gap between *configured* and *authorized* at a glance.
 ```

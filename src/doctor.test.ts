@@ -38,6 +38,11 @@ describe('archon doctor', () => {
     expect(out).toContain('planner:   deterministic (scaffold)');
     expect(out).toContain('providers: none configured');
     expect(out).toContain('plugins:   0 loaded');
+    // M30/M31/M39: surfaces are exposed but unauthorized in the default-deny
+    // safe profile, so the line shows 0 configured · 0 grant(s) but the
+    // inbound tool/method counts remain non-zero (compiled-in surface).
+    expect(out).toContain('mcp:       0 outbound configured · 0 grant(s) · 4 inbound tools');
+    expect(out).toContain('lsp:       3 methods exposed (read-only)');
     expect(out).toContain('index:   absent');
     expect(out).toContain('health:    no index'); // no index ⇒ no health score
     // probing existence must not open (create) any db
@@ -65,6 +70,14 @@ describe('archon doctor', () => {
     expect(report.providers).toEqual([]);
     expect(report.state).toEqual({ index: false, memory: false, journal: false });
     expect(report.plugins).toBe(0);
+    // Stable automation contract for the M30/M31/M39 surfaces (ADR-0020):
+    // a fresh repo has no outbound config + no grants, but the inbound
+    // surfaces (tools/methods) are part of the binary so the counts hold.
+    expect(report.integrations).toEqual({
+      mcpOutbound: { configured: 0, grants: 0 },
+      mcpInbound: { tools: 4 },
+      lspInbound: { methods: 3 },
+    });
     expect(report.health).toBeNull(); // no index to assess
     expect(report.evolution).toBeNull(); // no index ⇒ no evolution forecast
     // probing existence for the JSON path must still create no db

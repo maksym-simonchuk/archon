@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type ApprovalCardInput,
+  buildApprovalCardRows,
+  buildPatchCardRows,
   clip,
   commandMenu,
   editKey,
   fmtTokens,
   type InputState,
   menuWindowStart,
+  type PatchCardInput,
   shortModel,
   tailLines,
   visibleWidth,
@@ -143,5 +147,89 @@ describe('shortModel', () => {
   it('passes a bare id through unchanged', () => {
     expect(shortModel('cheap')).toBe('cheap');
     expect(shortModel('')).toBe('');
+  });
+});
+
+describe('buildApprovalCardRows', () => {
+  const card: ApprovalCardInput = {
+    approvalId: 'apv_abcdef1234567890',
+    capability: 'fs.write',
+    target: 'src/foo.ts',
+    blastRadius: 3,
+    reason: 'writes outside repo root',
+  };
+
+  it('returns nothing when there is no pending request', () => {
+    expect(buildApprovalCardRows(undefined, 0, 80)).toEqual([]);
+  });
+
+  it('returns nothing for a degenerate width', () => {
+    expect(buildApprovalCardRows(card, 0, 2)).toEqual([]);
+  });
+
+  it('builds a 5-row card with stable border width', () => {
+    const rows = buildApprovalCardRows(card, 0, 60);
+    expect(rows).toHaveLength(5);
+    expect(visibleWidth(rows[0])).toBe(60);
+    expect(visibleWidth(rows[4])).toBe(60);
+    // Body rows include the vertical bars: visible width = cols
+    expect(visibleWidth(rows[1])).toBe(60);
+    expect(visibleWidth(rows[2])).toBe(60);
+    expect(visibleWidth(rows[3])).toBe(60);
+  });
+
+  it('mentions the capability, target, and approval id', () => {
+    const rows = buildApprovalCardRows(card, 0, 80).join('\n');
+    expect(rows).toContain('fs.write');
+    expect(rows).toContain('3 files');
+    expect(rows).toContain('src/foo.ts');
+    expect(rows).toContain(card.approvalId.slice(0, 12));
+  });
+
+  it('surfaces the "+N more" hint when extra requests are queued', () => {
+    const rows = buildApprovalCardRows(card, 2, 100).join('\n');
+    expect(rows).toContain('+2 more');
+  });
+
+  it('omits "+N more" when there is only one pending request', () => {
+    const rows = buildApprovalCardRows(card, 0, 100).join('\n');
+    expect(rows).not.toContain('more');
+  });
+});
+
+describe('buildPatchCardRows', () => {
+  const card: PatchCardInput = {
+    patchId: 'pat_1234567890abcdef',
+    files: ['src/a.ts', 'src/b.ts'],
+    totalHunks: 4,
+    acceptedHunks: 3,
+  };
+
+  it('returns nothing when there is no patch', () => {
+    expect(buildPatchCardRows(undefined, 80)).toEqual([]);
+  });
+
+  it('returns nothing for a degenerate width', () => {
+    expect(buildPatchCardRows(card, 2)).toEqual([]);
+  });
+
+  it('builds a 5-row card with stable border width', () => {
+    const rows = buildPatchCardRows(card, 70);
+    expect(rows).toHaveLength(5);
+    for (const r of rows) expect(visibleWidth(r)).toBe(70);
+  });
+
+  it('mentions the file count, hunk counts, and toggle hint', () => {
+    const body = buildPatchCardRows(card, 100).join('\n');
+    expect(body).toContain('3/4 hunks');
+    expect(body).toContain('2 files');
+    expect(body).toContain('/diff toggle');
+    expect(body).toContain('src/a.ts');
+  });
+
+  it('collapses long file lists with +N marker', () => {
+    const wide: PatchCardInput = { ...card, files: ['a.ts', 'b.ts', 'c.ts', 'd.ts', 'e.ts'] };
+    const body = buildPatchCardRows(wide, 100).join('\n');
+    expect(body).toContain('+2');
   });
 });

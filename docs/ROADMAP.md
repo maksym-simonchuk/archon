@@ -7,9 +7,17 @@ under `src/` (and `crates/` for the Rust core).
 
 Toolchain: **Node ≥ 24** (host; uses built-in `node:sqlite`) + **Rust stable & `wasm-pack`** (compute core, ADR-0011).
 
-> M0–M7 below build the **safety + cognition substrate**. The **repository-intelligence
-> half** of the spec (deep `init`, boundaries, violations, preservation, autonomy,
-> daemon — milestones M8→M24) is planned in [`ROADMAP-INTELLIGENCE.md`](ROADMAP-INTELLIGENCE.md).
+## Status (current branch: `feat/runtime-v2-substrate`)
+
+The roadmap is split across three documents — Archon now ships **all three phases**:
+
+| Phase | Milestones | Document | Status |
+| --- | --- | --- | --- |
+| **Safety + cognition substrate** | M0–M7 | this file | ✅ shipped |
+| **Repository intelligence** | M8–M24 | [`ROADMAP-INTELLIGENCE.md`](ROADMAP-INTELLIGENCE.md) | ✅ shipped (merged to `main` via PR #6) |
+| **Runtime v2 (realtime UX + open standards)** | M25–M40 | [`RUNTIME-V2.md`](RUNTIME-V2.md) §7 | ✅ shipped on this branch |
+
+Runtime v2 (M25–M40) closes out the Mastra-shaped DAG, OpenSpec, MCP client+server, LSP bridge, OTel exporter, session replay, plugin ABI v1, and TUI cards (`/diff`, `/approve`, `/spec`, `/replay --live`, `/workflow`, `/council`, `/mcp`, `/lsp`). See `RUNTIME-V2.md` §7 for the per-milestone state.
 
 Legend: ✅ done · ⬜ todo
 

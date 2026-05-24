@@ -20,3 +20,11 @@ decision = add a new ADR and mark the old one `superseded`.
 | 0010 | Safe-by-default profiles + design-before-act       | accepted |
 | 0011 | Rust → WASM compute core for hot paths             | accepted |
 | 0012 | Provider plugins as a cap-gated router fallback    | accepted |
+| 0013 | OpenSpec as plan artifact                          | accepted |
+| 0014 | Mastra workflow scope                              | accepted |
+| 0015 | Runtime v2 safety invariants                       | accepted |
+| 0016 | PatchStore + staged-diff UX                        | accepted |
+| 0017 | Bus journal + replay                               | accepted |
+| 0018 | BrokerSpecStore + planner emit                     | accepted |
+| 0019 | `broker.fsDelete` capability                       | accepted |
+| 0020 | MCP read-only surface + LSP runtime binding        | accepted |

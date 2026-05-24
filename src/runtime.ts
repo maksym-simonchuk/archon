@@ -15,7 +15,13 @@ import { Verifier } from './cognition/verifier';
 import { loadComputeCore, type ComputeCore } from './core/compute';
 import type { BlastRadius, MemoryTier, Profile, Task } from './core/types';
 import { AgentBroker } from './effecting/agent-broker';
+import { ApprovalBroker } from './effecting/approval';
 import { AuditLog } from './effecting/audit-log';
+import { PatchStore } from './effecting/diff/patch-store';
+import { BrokerSpecStore } from './cognition/openspec/broker-spec-store';
+import type { SpecStore } from './cognition/openspec/spec-commands';
+import { WorkflowRegistry } from './cognition/workflow-registry';
+import { buildRepoDoctorWorkflow } from './cognition/builtin-workflows';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
@@ -24,6 +30,7 @@ import { MemoryStore } from './memory/store';
 import { embedText } from './memory/vector-index';
 import { createPersistedRetriever } from './plugins/builtin/persisted-retriever';
 import type { RetrieverPlugin } from './plugins/abi';
+import { evalsRecorder } from './plugins/builtin/evals';
 import { decomposeIntent } from './sensing/context-scope';
 import { ContextService } from './sensing/context-service';
 import { extractImports, resolveImport } from './sensing/import-resolver';
@@ -32,6 +39,9 @@ import { IndexStore } from './sensing/store';
 import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
+import { loadMcpConfig, type McpConfig } from './services/mcp/mcp-config';
+import { createEventBus, type EventBus } from './services/event-bus';
+import { OtelExporter, exporterFromEnv } from './services/otel';
 import { createAiClient } from './services/providers/ai-sdk';
 import { resolveModels } from './services/model-catalog';
 import { PluginHost } from './services/plugin-host';
@@ -89,6 +99,13 @@ export interface Runtime {
   readonly llmPlanning: boolean;
   /** Configured providers: whether a client-builder exists (`supported`) and whether its key is in the env (key value never exposed). */
   readonly providerStatus: { id: string; supported: boolean; keyPresent: boolean }[];
+  /**
+   * Runtime v2 event bus (see `docs/RUNTIME-V2.md` §4.1, ADR-0015). Every
+   * surface that needs to observe the runtime — TUI token meter, OTel exporter,
+   * replay, eval recorder, event-listener plugins — subscribes here. The bus
+   * carries no authority; it is a wire, not a gate.
+   */
+  readonly bus: EventBus;
   /** Planner using the chosen strategy (ProviderPlanner, else ScaffoldStrategy). */
   planner(): Planner;
   /** Assemble the budgeted repo-map context for a task (empty for the offline planner). */
@@ -116,6 +133,49 @@ export interface Runtime {
   pluginHost(): Promise<PluginHost>;
   /** A PolicyEngine for `profile` (defaults to the config profile) — pure capability previews, no audit. */
   policy(profile?: Profile): PolicyEngine;
+  /**
+   * v2 capability authorizer (M30/M31/M33/M38). MCP/LSP/workflow/replay
+   * surfaces call this to check a bespoke `namespace:value[:value...]` cap
+   * against the active profile's `v2_capabilities`. Default-deny: unknown
+   * namespaces and unlisted caps return 'deny'.
+   */
+  authorizeV2(capability: string): Promise<'allow' | 'deny'>;
+  /**
+   * Approval broker (M32). Publishes `approval.request` on the bus and
+   * blocks the broker's caller until the UI resolves with allow|deny.
+   * A single shared instance per runtime so every surface (TUI, automation,
+   * future MCP relays) resolves through the same queue.
+   */
+  readonly approval: ApprovalBroker;
+  /**
+   * Patch store (M27/M32). Holds the most recent staged PatchSet so the TUI
+   * can show `/diff` and stage hunks before the broker writes them. The
+   * store itself is authority-free — it decides *what* should be written,
+   * the Capability Broker decides *whether*.
+   */
+  readonly patches: PatchStore;
+  /**
+   * OpenSpec change store (M29 / ADR-0013). Reads & writes the
+   * `openspec/changes/<id>/` and `openspec/archive/<id>/` trees through the
+   * Capability Broker, so plan-artifact emit is gated by the same policy as
+   * any other write. `/spec status|diff|validate|archive` work against this
+   * instance; the planner also calls `writeChange` after a plan succeeds.
+   */
+  readonly specs: SpecStore;
+  /**
+   * Workflow registry (M33). Holds named workflows + currently-suspended
+   * runs; the shell drives them via `/workflow run|resume|status`. The
+   * registry itself is authority-free — step bodies route every effect
+   * through the broker (ADR-0015 invariant 2).
+   */
+  readonly workflows: WorkflowRegistry;
+  /**
+   * Configured outbound MCP servers (M30, ADR-0015). Parsed from
+   * `.archon/mcp.yaml` at runtime construction. Empty list when the file
+   * is absent. *Configured* ≠ *authorized* — every outbound call still
+   * routes through `authorizeV2('mcp:<server>:<tool>')`.
+   */
+  readonly mcp: McpConfig;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -132,7 +192,41 @@ export interface Runtime {
 export async function buildRuntime(root: string): Promise<Runtime> {
   const config = await loadConfig(root);
   const policyDoc: PolicyDocument = loadPolicy(await readFile(join(root, config.paths.policy), 'utf8'));
+  // Configured outbound MCP servers (M30). Missing `.archon/mcp.yaml` is not
+  // an error — the policy still default-denies the `mcp:*` namespace, so a
+  // server has to be both *configured here* and *authorized in policy.yaml*
+  // to be callable. The two layers compose; this one just enumerates.
+  const mcp = await loadMcpConfig(root);
   const audit = new AuditLog();
+
+  // The v2 event bus is built first so every downstream that takes it as an
+  // option (router, MCP server, plugin host) can be wired with the same wire.
+  // Bounded ring + drop-oldest semantics live inside InMemoryEventBus.
+  const bus = createEventBus();
+
+  // Approval broker (M32). One instance per runtime — every surface that
+  // needs human confirmation routes through it. Publishes `approval.request`
+  // on the bus; the TUI's subscriber renders a card and calls back via
+  // `approval.resolve`.
+  const approval = new ApprovalBroker(bus);
+
+  // Patch store (M27/M32). Cognition stages a PatchSet; the TUI renders
+  // `/diff`; the user toggles hunks; the broker writes the resolved files.
+  // The store does no I/O — it only owns staged state.
+  const patches = new PatchStore(bus);
+
+  // Optional OTel exporter (M37). Off by default — only activates if
+  // `OTEL_EXPORTER_OTLP_ENDPOINT` is present in the environment. Telemetry is
+  // failure-silent (a 500 from the collector drops a batch, never throws),
+  // and the exporter only observes the bus — zero authority, zero gating.
+  // Closed on `rt.close()` so a final flush completes before process exit.
+  const otelOpts = exporterFromEnv(process.env);
+  const otel = otelOpts ? new OtelExporter(otelOpts) : undefined;
+  otel?.attach(bus);
+
+  // Bus journal recorder lifecycle flag (M38). The recorder loop is wired
+  // below, after the journal getter is declared.
+  let busRecorderAlive = true;
 
   const models = resolveModels(config.providers);
   const clients = buildClients(config.providers);
@@ -144,6 +238,9 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     // router ever needs a fallback. `pluginHost` is defined below — the closure
     // captures it and is never called before buildRuntime returns. See ADR-0012.
     providerPlugins: async () => (await pluginHost()).providerPlugins(),
+    // The router publishes per-token deltas + a final usage event on this bus
+    // for the surfaces that subscribe (TUI token meter, OTel, replay).
+    bus,
   });
 
   const llmPlanning = models.length > 0 && clients.length > 0;
@@ -157,6 +254,16 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
     new CapabilityBroker(new PolicyEngine(policyDoc, profile), audit, cwd);
+
+  // OpenSpec spec store (M29). Filesystem-backed; every read/write/list goes
+  // through the broker, so plan-artifact emit is policy-gated like any other
+  // write. Shared across `/spec` and the planner-emit pathway.
+  const specs: SpecStore = new BrokerSpecStore(brokerAt(root));
+
+  // Workflow registry (M33). One per runtime — wired to the same bus so
+  // step.start/result events stay correlated with the run.
+  const workflows = new WorkflowRegistry(bus);
+  workflows.register(buildRepoDoctorWorkflow(), 'parallel quick checks + a one-line synthesis');
 
   // A trusted broker narrowed to one agent's declared capabilities (M18). It can
   // only deny actions the agent didn't declare — never widen authority — so the
@@ -173,6 +280,29 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // recall ranks against the stored matrix instead of re-embedding each query (M24).
   const memory = (): MemoryStore => (memoryStore ??= new MemoryStore(join(root, config.paths.memory), embedText));
   const journal = (): TaskJournal => (journalStore ??= new TaskJournal(join(root, config.paths.journal)));
+
+  // Persist every bus event for later replay via `/replay <runId>`. The
+  // journal is lazy — the recorder calls `journal()` on its first observed
+  // event, which opens sqlite on demand. sqlite write errors are swallowed
+  // (disk full, permission, schema mismatch) so a misbehaving disk can't
+  // stall cognition; the loss is observable only by missing journal rows.
+  //
+  // `replay:` runId prefix: events the M38 `/replay --live` command publishes
+  // through the bus carry a synthetic `replay:<original>:<n>` runId so they
+  // are skipped here (otherwise replaying would loop the journal — record →
+  // re-emit → record → …). Real events never use the prefix; the synthesis
+  // happens only inside the /replay --live adapter.
+  void (async (): Promise<void> => {
+    for await (const e of bus.subscribe()) {
+      if (!busRecorderAlive) break;
+      if (e.runId.startsWith('replay:')) continue;
+      try {
+        journal().appendBusEvent(e);
+      } catch {
+        /* drop — replay loses one row, the engine keeps running */
+      }
+    }
+  })();
   const computeCore = async (): Promise<ComputeCore> => (core ??= await loadComputeCore());
 
   const planner = (): Planner => new Planner(strategy);
@@ -371,18 +501,46 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // Build the host once and load `.archon/plugins/<name>/plugin.mjs` (sibling of
   // the policy file). The dynamic import is host bootstrapping; loaded plugins
   // still receive no authority beyond what the broker grants at call time.
+  // M40 wiring: we additionally (a) register `evalsRecorder` as a built-in v1
+  // event-listener (so a session can be replayed/evaluated without extra
+  // setup) and (b) call `attachListeners(bus)` so v1 listeners start receiving
+  // events the moment the host is built. Listeners observe; they do not gate.
   const pluginHost = (): Promise<PluginHost> =>
     (host ??= (async () => {
       const h = new PluginHost(brokerAt(root));
       await h.load(join(root, dirname(config.paths.policy), 'plugins'));
+      // Built-in event listener: accumulates the session into a buffer that
+      // `evals` / `replay` can drain. Pure observation, no capability needs.
+      h.registerV1(evalsRecorder());
+      h.attachListeners(bus);
       return h;
     })());
 
   const policy = (profile: Profile = config.profile): PolicyEngine => new PolicyEngine(policyDoc, profile);
 
+  // v2 authorizer (M30/M31/M33/M38): a single async-shaped adapter so the MCP
+  // client, LSP server, workflow runtime, and replay command all consult the
+  // same `v2_capabilities` block. Pure delegation — no audit log entry, matches
+  // PolicyEngine.describe in being a read-only check.
+  const authorizeV2 = (capability: string): Promise<'allow' | 'deny'> =>
+    Promise.resolve(policy().evaluateV2(capability));
+
   const close = (): void => {
+    // Stop the bus journal recorder before closing the journal — otherwise a
+    // racing event could try to write through a closed sqlite handle.
+    busRecorderAlive = false;
     memoryStore?.close();
     journalStore?.close();
+    // Best-effort final flush of any buffered spans. The exporter swallows
+    // network errors itself (telemetry must never break the engine).
+    if (otel) void otel.stop();
+    // Cancel v1 listener subscriptions (the host hasn't been awaited if we
+    // never called `pluginHost()` — `.then` on the unresolved promise is a
+    // no-op since `host` is undefined). After that, close the bus.
+    void host?.then((h) => h.dispose()).catch(() => undefined);
+    // Closes every live subscriber's iterator cleanly (including OTel's).
+    // Pending publications never throw, so a producer racing close just drops.
+    bus.close();
   };
 
   return {
@@ -391,6 +549,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     router,
     llmPlanning,
     providerStatus,
+    bus,
     planner,
     context,
     brokerAt,
@@ -401,6 +560,12 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     indexer,
     pluginHost,
     policy,
+    authorizeV2,
+    approval,
+    patches,
+    specs,
+    workflows,
+    mcp,
     close,
   };
 }

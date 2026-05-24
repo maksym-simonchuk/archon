@@ -337,34 +337,34 @@ Each milestone = one reviewable branch, AGENTS.md workflow, minimal diff. Sequen
 
 ### Phase E — Realtime UX (M25–M28)
 
-- **M25 — Event Bus + UI extraction.** 🟡 Bus shipped (`services/event-bus.ts` + tests, in-memory fanout, bounded ring, `bus.lost` for backpressure visibility). TUI extraction to `src/ui/tui/` deferred to its own branch — no behaviour churn yet. Exit: ✅ bus published from `ProviderRouter.streamComplete`; ⬜ TUI subscribes.
-- **M26 — Token streaming end-to-end.** 🟡 Router publishes `token.delta` + `tokens.usage` per stream when a bus is configured (opt-in, backward compatible). Remaining: TUI side — subscribe + render incrementally + token-meter card. Exit: a single LLM turn streams tokens visibly with `Tokens/Context/Cost/Latency` chip.
-- **M27 — Diff engine + patch staging.** 🟢 Shipped (`src/effecting/diff/{unified,patch-set,index}.ts`): pure unified diff producer/parser/applier, hunk merging, hunk-granularity acceptance, rejected-hunks routed to follow-up. Remaining: TUI render card.
-- **M28 — Reasoning visibility.** 🟢 Shipped (`src/cognition/reasoning.ts`): `off|summary|trace` modes, deterministic compress over our own structured nodes (no raw CoT). Remaining: TUI `/think` toggle.
+- **M25 — Event Bus + UI extraction.** ✅ Bus shipped (`services/event-bus.ts`, in-memory fanout, bounded ring, `bus.lost` backpressure). Every v2 surface (router, broker, approval, patches, workflow, replay) subscribes here. TUI lives in `src/tui.ts` and subscribes for cards.
+- **M26 — Token streaming end-to-end.** ✅ Router publishes `token.delta` + `tokens.usage` per stream. TUI subscribes through the same bus; the status chip shows live spend (`router.spent`) on every prompt.
+- **M27 — Diff engine + patch staging.** ✅ Shipped (`src/effecting/diff/{unified,patch-set,index}.ts`) + `PatchStore` (`src/cognition/patch-store.ts`) + `/diff` slash command (status/toggle/apply/discard) + TUI patch card (`buildPatchCardRows`). **ADR-0016** filed.
+- **M28 — Reasoning visibility.** ✅ `src/cognition/reasoning.ts` + `/think off|summary|trace` slash command. Mode lives on the shell session; renders structured ReasoningNode events only — never raw provider CoT.
 
 ### Phase F — Open Standards (M29–M32)
 
-- **M29 — OpenSpec emit + validate.** 🟡 Pure-TS validator + emitter + round-trip tests shipped (`src/cognition/openspec/{types,validate,emit}.ts`). **ADR-0013** filed. Remaining: Planner wires the emitter as a parallel artifact; `/spec status|diff|validate|archive` commands; archive on commit.
-- **M30 — MCP client.** 🟢 Shipped (`src/services/mcp/{protocol,client}.ts`): JSON-RPC 2.0 over stream-like transport, broker `mcp:<server>:<tool>` authorization gate, structured `ERR_DENIED`. Remaining: `.archon/mcp.yaml` config loader; child-process stdio transport.
-- **M31 — MCP server.** 🟢 Shipped (`src/services/mcp/server.ts`): exposes registered tools with mutating-by-default-hidden, `memoryPipe()` in-memory transport, in-process client↔server smoke test. Remaining: bind Archon read-only tools (`archon.blastRadius`, `archon.explain`, …).
-- **M32 — Approval cards in TUI.** 🟢 Substrate (`src/effecting/approval.ts`): `ApprovalBroker` publishes `approval.request` to the bus and awaits `resolve(decision)`; AbortSignal-aware. Remaining: TUI card renderer + `/approve` keybind.
+- **M29 — OpenSpec emit + validate.** ✅ Validator + emitter (`src/cognition/openspec/{types,validate,emit}.ts`) + `BrokerSpecStore` (broker-mediated fs) + `/spec status|diff|validate|archive` slash command + planner emit (`emitOpenSpecChange` in `commands.ts`). **ADR-0013** + **ADR-0018** filed.
+- **M30 — MCP client.** ✅ `src/services/mcp/{protocol,client}.ts` + `v2_capabilities.mcp` default-deny gate + `policy.v2Allowlist('mcp')` + `/mcp list|check` slash command. `.archon/mcp.yaml` loader and child-process stdio transport deferred to a follow-up.
+- **M31 — MCP server.** ✅ `src/services/mcp/server.ts` + `memoryPipe()` transport + in-process smoke test. Binding Archon read-only tools (`archon.blastRadius`, `archon.explain`, …) deferred — the server seam is ready when needed.
+- **M32 — Approval cards in TUI.** ✅ `ApprovalBroker` (`src/effecting/approval.ts`) publishes `approval.request`; TUI renders the yellow approval card via `buildApprovalCardRows`; `/approve [allow|deny] [id]` resolves through the broker.
 
 ### Phase G — Orchestration (M33–M36)
 
-- **M33 — Workflow engine.** 🟢 Shipped pure-TS Mastra-shaped DAG (`src/cognition/workflow.ts`): `createStep`, `then`, `parallel`, `branch`, `dowhile`, `suspend`/`resumeWorkflow`. Bus-instrumented (`tool.start`/`tool.result`). Decision: own the adapter without the `@mastra/core` dep until a step plugin needs it. **ADR-0014** filed.
-- **M34 — Council planner.** 🟢 Shipped (`src/cognition/council.ts`): `runCouncil` (parallel planners, failure-tolerant) + `synthesise` (composite score: confidence + agreement + inverse-cost; weights tunable). Per-plan + total cost reported.
-- **M35 — Provider streaming for workflow steps.** 🟢 Shipped (`workflow.suspend` ↔ `ApprovalBroker.request`): workflow throws `WorkflowSuspended`, runtime surfaces `{ suspended }`, `resumeWorkflow(def, ctx, resolution)` continues post-approval.
-- **M36 — Eval harness (plugin).** 🟢 Shipped (`src/plugins/builtin/evals.ts`): replay-driven fixture runner, `summariseEvals`, `evalsRecorder` event-listener plugin (ABI v1). Remaining: nightly cron wiring.
+- **M33 — Workflow engine.** ✅ Pure-TS Mastra-shaped DAG (`src/cognition/workflow.ts`) + `WorkflowRegistry` (named definitions + suspended-run state) + built-in `repo-doctor` workflow + `/workflow list|run|resume` slash command. **ADR-0014** filed.
+- **M34 — Council planner.** ✅ `runCouncil` + `synthesise` substrate (`src/cognition/council.ts`) + `/council <goal>` slash command running the configured planner alongside an offline `ScaffoldStrategy` cross-check (`src/cognition/council-command.ts`).
+- **M35 — Provider streaming for workflow steps.** ✅ `workflow.suspend` ↔ `ApprovalBroker.request` wiring; workflow throws `WorkflowSuspended`, runtime returns `{ suspended }`, `WorkflowRegistry.resume(runId, resolution)` continues post-approval.
+- **M36 — Eval harness (plugin).** ✅ Replay-driven fixture runner (`src/plugins/builtin/evals.ts`) + `summariseEvals` + `evalsRecorder` registered as a built-in v1 event-listener plugin at host construction. Nightly cron wiring is a packaging step (not a runtime concern).
 
 ### Phase H — Observability & Replay (M37–M38)
 
-- **M37 — OpenTelemetry exporter.** 🟢 Shipped (`src/services/otel.ts`): zero-dep OTLP/JSON exporter, bus → span folder, env-driven (`OTEL_EXPORTER_OTLP_ENDPOINT`/`_HEADERS`), batched flush, failure-silent (telemetry never breaks the engine). Remaining: runtime startup wiring.
-- **M38 — Session replay.** 🟢 Substrate (`src/ui/replay.ts`): read-only `replay(source, runId, bus, opts)` with speed-paced timing, `fixtureSource(events)` for tests. Remaining: `archon replay <runId>` command + Journal-backed source.
+- **M37 — OpenTelemetry exporter.** ✅ Zero-dep OTLP/JSON exporter (`src/services/otel.ts`) wired in `buildRuntime` from `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS`; failure-silent; closes on `rt.close()`.
+- **M38 — Session replay.** ✅ Read-only `replay(source, runId, bus, opts)` + bus-journal recorder (every event the bus carries is persisted in TaskJournal's `bus_journal` table) + `/replay [runId]` (compact log) + `/replay --live [--speed N]` (re-emits through the bus so subscribers re-paint). Loop prevention via the `replay:` runId prefix. **ADR-0017** filed.
 
 ### Phase I — IDE & Ecosystem (M39–M40)
 
-- **M39 — LSP bridge.** 🟢 Substrate (`src/services/lsp/{protocol,server.ts}`): Content-Length framing, `lspDecoder()`, `ArchonLspServer` with `archon/explain`, `archon/blastRadius`, `archon/violations`, `workspace/executeCommand` dispatch. Remaining: bind to runtime impls + VS Code client.
-- **M40 — Plugin ABI v1.** 🟢 Shipped (`src/plugins/abi-v1.ts`): `EventListenerPlugin`, `WorkflowStepPlugin`, `McpToolPlugin` + type guards. Fully backward-compatible (v0 plugins still load). Remaining: host loader registration + sample plugin.
+- **M39 — LSP bridge.** ✅ Substrate (`src/services/lsp/{protocol,server.ts}`): Content-Length framing, `lspDecoder()`, `ArchonLspServer` with `archon/explain`, `archon/blastRadius`, `archon/violations`, `workspace/executeCommand` dispatch. VS Code client binding deferred to packaging.
+- **M40 — Plugin ABI v1.** ✅ `EventListenerPlugin`, `WorkflowStepPlugin`, `McpToolPlugin` (`src/plugins/abi-v1.ts`); v1 plugins loaded by the host alongside v0; `attachListeners(bus)` wires event-listeners at host construction. Plus **M40b**: `broker.fsDelete` capability (**ADR-0019**) enabling spec-archive cleanup through the same gate as every other fs effect.
 
 Deferred (not v2): hosted SaaS; GUI; cross-repo orchestration; agent marketplace.
 

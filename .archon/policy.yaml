@@ -41,3 +41,27 @@ limits:
   per_task_usd: 2.00
   global_daily_usd: 25.00
   context_tokens_max: 60000
+
+# v2 capability namespaces (M30/M31/M33/M38, ADR-0015). Bespoke strings the
+# MCP / LSP / workflow / replay surfaces route through PolicyEngine.evaluateV2.
+# Default-deny: an empty / missing list for a namespace means every capability
+# in that namespace is refused. Add concrete entries to grant — exact match,
+# `prefix:*` (suffix wildcard inside a namespace), or `*` (everything). The
+# safe-by-default invariant holds: enabling a new namespace is an explicit edit.
+v2_capabilities:
+  # External MCP tools: `mcp:<server>:<tool>` (e.g. `mcp:filesystem:read_file`).
+  # Empty list ⇒ no external MCP tool may be called.
+  mcp: []
+  # LSP method dispatch: `lsp:<method>` (e.g. `lsp:archon/blastRadius`).
+  # The read-only diagnostics surface is enabled by default below.
+  lsp:
+    - archon/blastRadius
+    - archon/explain
+    - archon/violations
+  # Workflow steps a step plugin contributes: `workflow:<stepId>`. Empty list
+  # ⇒ no third-party workflow step can run (built-in steps don't traverse here).
+  workflow: []
+  # Session replay: `replay:<runId>` — strictly read-only by contract.
+  # Wildcard allows replaying any recorded session; safe-by-design (read-only).
+  replay:
+    - "*"

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type { BlastRadius, CapabilityRequest, PolicyVerdict } from '../core/types';
@@ -22,6 +22,16 @@ export interface FsWriteOptions extends PolicyEvalContext {
 export interface FsReadOptions extends PolicyEvalContext {
   /** Why the read is happening (recorded in the audit log). */
   reason: string;
+}
+
+/** Options for a guarded filesystem delete. */
+export interface FsDeleteOptions extends PolicyEvalContext {
+  /** Files transitively removed — drives the blast-radius rules. */
+  blastRadius?: BlastRadius;
+  /** Why the delete is happening (recorded in the audit log). */
+  reason: string;
+  /** Delete a directory tree recursively. Default: file-only delete. */
+  recursive?: boolean;
 }
 
 /** Options for a guarded command execution. */
@@ -121,6 +131,74 @@ export class CapabilityBroker {
       return ok(await readFile(real, 'utf8'));
     } catch (e) {
       return err({ code: 'fs.read_failed', message: e instanceof Error ? e.message : String(e), cause: e });
+    }
+  }
+
+  /**
+   * Guarded directory listing. Re-uses the `fs.read` capability — listing a
+   * directory is a read of its inode entries. Returns names only (not full
+   * paths), with directories suffixed by `/` so the caller can distinguish.
+   * A missing directory returns an empty list (not an error) so callers can
+   * treat "no openspec/changes yet" uniformly.
+   */
+  async fsList(target: string, opts: FsReadOptions): Promise<Result<string[]>> {
+    const real = await realContainedPath(this.repoRoot, target);
+    if (real === null) {
+      const verdict: PolicyVerdict = {
+        decision: 'deny',
+        rule: 'broker.repo_escape',
+        message: `path escapes the repo tree: ${target}`,
+      };
+      this.record({ action: 'fs.read', target, reason: opts.reason }, verdict, opts.taskId);
+      return err({ code: 'policy.deny', message: verdict.message });
+    }
+    const verdict = await this.request({ action: 'fs.read', target, reason: opts.reason }, opts);
+    if (verdict.decision !== 'allow') {
+      return err({ code: `policy.${verdict.decision}`, message: verdict.message });
+    }
+    try {
+      const entries = await readdir(real, { withFileTypes: true });
+      return ok(entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)));
+    } catch (e) {
+      // ENOENT = "not yet" — return empty so callers don't need a special case.
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return ok([]);
+      return err({ code: 'fs.list_failed', message: e instanceof Error ? e.message : String(e), cause: e });
+    }
+  }
+
+  /**
+   * Guarded filesystem delete (M40b). Refuses to escape the repo tree
+   * (following symlinks), evaluates the `fs.delete` capability, and removes
+   * only on `allow`. `recursive:true` removes a directory tree; otherwise a
+   * single file. Default-deny in `safe` profile (policy.yaml asks); `trusted`
+   * may grant explicitly. A missing target resolves to a no-op `ok`.
+   */
+  async fsDelete(target: string, opts: FsDeleteOptions): Promise<Result<void>> {
+    const real = await realContainedPath(this.repoRoot, target);
+    if (real === null) {
+      const verdict: PolicyVerdict = {
+        decision: 'deny',
+        rule: 'broker.repo_escape',
+        message: `path escapes the repo tree: ${target}`,
+      };
+      this.record({ action: 'fs.delete', target, reason: opts.reason }, verdict, opts.taskId);
+      return err({ code: 'policy.deny', message: verdict.message });
+    }
+    const req: CapabilityRequest = {
+      action: 'fs.delete',
+      target,
+      blastRadius: opts.blastRadius,
+      reason: opts.reason,
+    };
+    const verdict = await this.request(req, opts);
+    if (verdict.decision !== 'allow') {
+      return err({ code: `policy.${verdict.decision}`, message: verdict.message });
+    }
+    try {
+      await rm(real, { recursive: opts.recursive ?? false, force: true });
+      return ok(undefined);
+    } catch (e) {
+      return err({ code: 'fs.delete_failed', message: e instanceof Error ? e.message : String(e), cause: e });
     }
   }
 

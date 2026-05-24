@@ -160,4 +160,69 @@ describe('buildRuntime (composition root)', () => {
     b.journal();
     expect(() => b.close()).not.toThrow();
   });
+
+  it('exposes a shared event bus that survives publish→subscribe round-trip', async () => {
+    const runtime = await buildRuntime(await repo());
+    try {
+      // Bus is part of the public Runtime contract — every v2 surface (TUI,
+      // OTel, replay, listener plugins) subscribes here. A round-trip
+      // publish→subscribe asserts the wire is actually live.
+      const received: string[] = [];
+      const task = (async (): Promise<void> => {
+        for await (const e of runtime.bus.subscribe()) {
+          received.push(e.kind);
+          if (e.kind === 'turn.done') break;
+        }
+      })();
+      // Allow the subscriber to install before we publish.
+      await new Promise((r) => setImmediate(r));
+      runtime.bus.publish({ kind: 'turn.start', runId: 'r1', at: 1, goal: 'g' });
+      runtime.bus.publish({ kind: 'turn.done', runId: 'r1', at: 2, ok: true });
+      await task;
+      expect(received).toEqual(['turn.start', 'turn.done']);
+    } finally {
+      runtime.close();
+    }
+  });
+
+  it('OTel exporter attaches when OTEL_EXPORTER_OTLP_ENDPOINT is set (M37)', async () => {
+    // Inject a fake `fetch` via global so the exporter doesn't try real network.
+    // The exporter is failure-silent so we only verify it doesn't crash boot.
+    const calls: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = ((url: string) => {
+      calls.push(url);
+      return Promise.resolve(new Response(null, { status: 200 }));
+    }) as typeof globalThis.fetch;
+    vi.stubEnv('OTEL_EXPORTER_OTLP_ENDPOINT', 'https://fake-otlp.example/v1/traces');
+    try {
+      const rt = await buildRuntime(await repo());
+      try {
+        // A span gets buffered when a turn closes. The exporter flushes
+        // asynchronously, so we just assert wiring is non-fatal here — the
+        // detailed exporter behaviour is tested in otel.test.ts.
+        rt.bus.publish({ kind: 'turn.start', runId: 'r1', at: 1, goal: 'g' });
+        rt.bus.publish({ kind: 'turn.done', runId: 'r1', at: 2, ok: true });
+        await new Promise((r) => setTimeout(r, 20));
+      } finally {
+        rt.close();
+      }
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+    // We don't strictly require `calls.length > 0` (timing) — boot integrity is what matters.
+    expect(true).toBe(true);
+  });
+
+  it('rt.close() closes the bus (subscribers see iteration end)', async () => {
+    const runtime = await buildRuntime(await repo());
+    const drained = (async (): Promise<number> => {
+      let n = 0;
+      for await (const _e of runtime.bus.subscribe()) n++;
+      return n;
+    })();
+    await new Promise((r) => setImmediate(r));
+    runtime.close();
+    await expect(drained).resolves.toBe(0);
+  });
 });

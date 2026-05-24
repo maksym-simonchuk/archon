@@ -1,5 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import type { JournalEntry } from '../core/types';
+import type { ArchonEvent } from './event-bus';
 
 const toEntry = (r: Record<string, unknown>): JournalEntry => ({
   seq: r.seq as number,
@@ -7,6 +8,29 @@ const toEntry = (r: Record<string, unknown>): JournalEntry => ({
   ts: r.ts as string,
   kind: r.kind as JournalEntry['kind'],
   payload: JSON.parse(r.payload as string) as unknown,
+});
+
+/**
+ * One row of the bus journal — a single ArchonEvent serialized for replay.
+ * `seq` orders events globally; `runId` clusters them per-turn so the replay
+ * command can reconstruct one stream without scanning the whole table.
+ */
+export interface BusJournalEntry {
+  seq: number;
+  runId: string;
+  /** The event's wall-clock `at` (epoch ms). */
+  at: number;
+  /** Discriminator (e.g. 'token.delta'). */
+  kind: ArchonEvent['kind'];
+  event: ArchonEvent;
+}
+
+const toBusEntry = (r: Record<string, unknown>): BusJournalEntry => ({
+  seq: r.seq as number,
+  runId: r.run_id as string,
+  at: r.at as number,
+  kind: r.kind as ArchonEvent['kind'],
+  event: JSON.parse(r.event as string) as ArchonEvent,
 });
 
 /**
@@ -32,6 +56,15 @@ export class TaskJournal {
         payload TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_journal_task ON journal(task_id);
+
+      CREATE TABLE IF NOT EXISTS bus_journal (
+        seq    INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        at     INTEGER NOT NULL,
+        kind   TEXT NOT NULL,
+        event  TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_bus_run ON bus_journal(run_id);
     `);
   }
 
@@ -57,6 +90,40 @@ export class TaskJournal {
       .prepare('SELECT seq, task_id, ts, kind, payload FROM journal ORDER BY seq DESC LIMIT ?')
       .all(limit) as Array<Record<string, unknown>>;
     return rows.map(toEntry);
+  }
+
+  /**
+   * Persist a single ArchonEvent. The whole event payload is stored as JSON so
+   * replay reconstructs the exact wire shape — no schema lossiness. Safe to
+   * call from a bus subscriber; sqlite writes are synchronous from JS's POV.
+   */
+  appendBusEvent(event: ArchonEvent): BusJournalEntry {
+    const res = this.db
+      .prepare('INSERT INTO bus_journal (run_id, at, kind, event) VALUES (?, ?, ?, ?)')
+      .run(event.runId, event.at, event.kind, JSON.stringify(event));
+    return { seq: Number(res.lastInsertRowid), runId: event.runId, at: event.at, kind: event.kind, event };
+  }
+
+  /** Every bus event for a run, in `at`/seq order — the replay stream. */
+  replayBus(runId: string): BusJournalEntry[] {
+    const rows = this.db
+      .prepare('SELECT seq, run_id, at, kind, event FROM bus_journal WHERE run_id = ? ORDER BY seq')
+      .all(runId) as Array<Record<string, unknown>>;
+    return rows.map(toBusEntry);
+  }
+
+  /** Distinct runIds in the bus journal, newest first — for `/replay` listing. */
+  recentRunIds(limit = 20): Array<{ runId: string; lastAt: number; events: number }> {
+    const rows = this.db
+      .prepare(
+        'SELECT run_id, MAX(at) AS last_at, COUNT(*) AS n FROM bus_journal GROUP BY run_id ORDER BY last_at DESC LIMIT ?',
+      )
+      .all(limit) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      runId: r.run_id as string,
+      lastAt: r.last_at as number,
+      events: r.n as number,
+    }));
   }
 
   close(): void {

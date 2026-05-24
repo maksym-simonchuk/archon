@@ -61,8 +61,26 @@ export interface ShellSession {
   abort?: AbortController;
   /** Dirty-set snapshot threaded across `/watch` ticks (M22) so each tick reports a delta. */
   watchDirty: ReadonlySet<string>;
+  /**
+   * Runtime v2 correlation id for the active turn. The TUI mints this on
+   * submit and threads it through every router/tool call so bus events from
+   * one turn can be grouped (and replayed) together. Undefined between turns.
+   */
+  currentRunId?: string;
+  /**
+   * Reasoning visibility mode for this session (M28). `off` (default) hides
+   * model reasoning; `summary` shows the deterministic compress of structured
+   * ReasoningNode events; `trace` shows the full structured trail. NEVER the
+   * provider's raw chain-of-thought — that boundary is in `cognition/reasoning.ts`.
+   * Controlled by `/think off|summary|trace`.
+   */
+  reasoningMode: 'off' | 'summary' | 'trace';
 }
-export const newSession = (): ShellSession => ({ askHistory: [], watchDirty: new Set() });
+export const newSession = (): ShellSession => ({
+  askHistory: [],
+  watchDirty: new Set(),
+  reasoningMode: 'off',
+});
 
 /** Every slash command the shell understands — drives tab-completion (and the TUI slash menu). */
 export const COMMANDS = [
@@ -93,6 +111,15 @@ export const COMMANDS = [
   '/recap',
   '/cost',
   '/model',
+  '/think',
+  '/approve',
+  '/diff',
+  '/replay',
+  '/spec',
+  '/workflow',
+  '/council',
+  '/mcp',
+  '/lsp',
   '/doctor',
   '/memory',
   '/promote',
@@ -135,6 +162,15 @@ const SHELL_HELP = `commands:
   /recap            per-run digest of recent activity + health trend
   /cost            session spend vs the per-task budget
   /model           provider routing table (models + per-task chain)
+  /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
+  /approve [allow|deny] [id]  resolve a pending approval card (M32)
+  /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
+  /replay [--live] [--speed <n>] [runId]  recorded bus stream — --live re-emits through the bus (M38)
+  /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
+  /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
+  /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
+  /mcp [list|tools|servers|check <server>:<tool>]  grants · tools (read-only surface) · servers (mcp.yaml) (M30/M31)
+  /lsp [list|blast <path>|explain <symbol>|violations [path]]  inspect LSP read-only surface (M39)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -154,6 +190,46 @@ tip: as you type, a dimmed suggestion (recent history / commands) trails the
 cursor — press → to accept it, Tab to complete a command.`;
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+
+/**
+ * One-line summary of an ArchonEvent for `/replay`. The journal stores the
+ * full event payload — this just renders the fields a human would scan for
+ * when reconstructing what happened during a run.
+ */
+function summarizeBusEvent(e: import('./services/event-bus').ArchonEvent): string {
+  switch (e.kind) {
+    case 'turn.start':
+      return e.goal.slice(0, 80);
+    case 'turn.done':
+      return `ok=${e.ok}${e.summary ? ` · ${e.summary}` : ''}`;
+    case 'token.delta':
+      return `${e.provider}/${e.modelId} ${JSON.stringify(e.text)}`;
+    case 'tokens.usage':
+      return `${e.provider}/${e.modelId} in=${e.usage.inputTokens} out=${e.usage.outputTokens} $${e.usage.costUsd.toFixed(4)}`;
+    case 'plan.ready':
+      return e.specPath;
+    case 'tool.start':
+      return `${e.tool} ${e.argsSummary}`;
+    case 'tool.result':
+      return `${e.tool} ok=${e.ok} ${e.summary}`;
+    case 'approval.request':
+      return `${e.capability} → ${e.target} (blast=${e.blastRadius})`;
+    case 'approval.resolve':
+      return `${e.approvalId} = ${e.decision}`;
+    case 'verdict':
+      return `ok=${e.ok} · ${e.summary}`;
+    case 'patch.staged':
+      return `${e.patchId} files=${e.files.length} hunks=${e.hunks}`;
+    case 'patch.toggled':
+      return `${e.patchId} ${e.editIndex}.${e.hunkIndex} = ${e.accepted}`;
+    case 'patch.resolved':
+      return `${e.patchId} writes=${e.writes} rejected=${e.rejected} errors=${e.errors}`;
+    case 'patch.discarded':
+      return e.patchId;
+    case 'bus.lost':
+      return `dropped=${e.dropped}`;
+  }
+}
 
 // Zero-dependency ANSI styling: active only on a real TTY and when NO_COLOR is
 // unset (https://no-color.org), so piped/non-interactive output stays plain.
@@ -199,6 +275,14 @@ function argCandidates(head: string, words: string[]): string[] {
       return MEMORY_COMPLETION_TIERS.map((t) => `/memory list ${t}`);
   }
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
+  if (head === '/think' && words.length === 2) return ['/think off', '/think summary', '/think trace'];
+  if (head === '/approve' && words.length === 2) return ['/approve allow', '/approve deny'];
+  if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
+  if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
+  if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
+  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp tools', '/mcp servers', '/mcp check'];
+  if (head === '/lsp' && words.length === 2) return ['/lsp list', '/lsp blast', '/lsp explain', '/lsp violations'];
+  if (head === '/replay' && words.length === 2) return ['/replay --live', '/replay --speed'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -302,7 +386,15 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         const controller = new AbortController();
         session.abort = controller;
         try {
-          const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS), controller.signal);
+          // Thread the surrounding turn's runId so the router's bus events
+          // group with the rest of the turn's activity.
+          const answer = await cmdAsk(
+            rt,
+            arg,
+            session.askHistory.slice(-ASK_CONTEXT_TURNS),
+            controller.signal,
+            session.currentRunId,
+          );
           if (answer) session.askHistory.push({ question: arg, answer });
         } finally {
           session.abort = undefined;
@@ -417,6 +509,209 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
     case '/model':
       await cmdModel(rt);
       return true;
+    case '/approve': {
+      // Resolve a pending approval card (M32). Usage:
+      //   /approve              → show pending requests' ids
+      //   /approve allow [id]   → allow the given id (default: the only one)
+      //   /approve deny  [id]   → deny  the given id
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const pending = rt.approval.pendingIds();
+      if (words.length === 0) {
+        if (pending.length === 0) console.log('no pending approvals');
+        else console.log(`pending approvals:\n  ${pending.join('\n  ')}`);
+        return true;
+      }
+      const decision = words[0];
+      if (decision !== 'allow' && decision !== 'deny') {
+        console.log('usage: /approve [allow|deny] [id]');
+        return true;
+      }
+      const id = words[1] ?? (pending.length === 1 ? pending[0] : undefined);
+      if (!id) {
+        console.log(
+          pending.length === 0
+            ? 'no pending approvals'
+            : `multiple pending — specify id: ${pending.join(', ')}`,
+        );
+        return true;
+      }
+      const ok = rt.approval.resolve(id, decision, session.currentRunId ?? id);
+      console.log(ok ? `${decision} ${id}` : `no such approval: ${id}`);
+      return true;
+    }
+    case '/diff': {
+      // Staged-patch UX (M27/M32). The store is populated by cognition; this
+      // command lets the user inspect, toggle hunks, then apply through the
+      // broker. The store itself does no I/O — it owns staged state only.
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const sub = words[0] ?? '';
+      const snap = rt.patches.current();
+
+      if (sub === '' || sub === 'status') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const totalH = snap.set.edits.reduce((n, e) => n + e.diff.hunks.length, 0);
+        const accH = snap.set.accepted.reduce((n, row) => n + row.filter(Boolean).length, 0);
+        console.log(bold(`patch ${snap.patchId} — ${accH}/${totalH} hunks accepted`));
+        for (let ei = 0; ei < snap.set.edits.length; ei++) {
+          const e = snap.set.edits[ei];
+          const acc = snap.set.accepted[ei];
+          if (!e || !acc) continue;
+          console.log(dim(`  ── ${e.path}`));
+          for (let hi = 0; hi < e.diff.hunks.length; hi++) {
+            const h = e.diff.hunks[hi];
+            if (!h) continue;
+            const mark = acc[hi] ? cyan('✓') : dim('·');
+            console.log(`  ${mark} [${ei}.${hi}] @@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`);
+          }
+        }
+        console.log(dim('toggle: /diff toggle e.h    apply: /diff apply    discard: /diff discard'));
+        return true;
+      }
+
+      if (sub === 'toggle') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const ref = words[1] ?? '';
+        const m = /^(\d+)\.(\d+)$/.exec(ref);
+        if (!m) {
+          console.log('usage: /diff toggle <editIndex>.<hunkIndex>');
+          return true;
+        }
+        const e = parseInt(m[1] as string, 10);
+        const h = parseInt(m[2] as string, 10);
+        const next = rt.patches.toggle(e, h);
+        if (next === undefined) console.log(`no such hunk: ${e}.${h}`);
+        else console.log(`hunk ${e}.${h}: ${next ? 'accepted' : 'rejected'}`);
+        return true;
+      }
+
+      if (sub === 'apply') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const result = rt.patches.resolve();
+        if (!result) {
+          console.log('no patch staged');
+          return true;
+        }
+        const { resolved } = result;
+        const broker = rt.brokerAt(rt.root);
+        const allPaths = Object.keys(resolved.writes);
+        let wrote = 0;
+        const failures: string[] = [];
+        for (const [path, content] of Object.entries(resolved.writes)) {
+          // Blast radius = every co-applied write. `escapesRepo` stays false —
+          // the broker's path-containment guard rejects any path that would.
+          const w = await broker.fsWrite(path, content, {
+            reason: '/diff apply',
+            blastRadius: { files: allPaths, symbols: [], escapesRepo: false },
+          });
+          if (w.ok) wrote++;
+          else failures.push(`${path}: ${w.error.message}`);
+        }
+        console.log(`wrote ${wrote}/${Object.keys(resolved.writes).length} files`);
+        if (resolved.rejected.length > 0) console.log(dim(`rejected hunks queued for follow-up: ${resolved.rejected.length}`));
+        if (resolved.errors.length > 0) for (const e of resolved.errors) console.log(`error: ${e.path}: ${e.reason}`);
+        if (failures.length > 0) for (const f of failures) console.log(`write-fail: ${f}`);
+        return true;
+      }
+
+      if (sub === 'discard') {
+        const ok = rt.patches.discard();
+        console.log(ok ? 'patch discarded' : 'no patch staged');
+        return true;
+      }
+
+      console.log('usage: /diff [toggle e.h|apply|discard]');
+      return true;
+    }
+    case '/replay': {
+      // Replay a recorded bus stream (M38). Reads from TaskJournal's
+      // bus_journal table — every event Archon emitted for the run, in
+      // append order. The shell prints a compact one-line-per-event view;
+      // `--live` republishes events through `rt.bus` so subscribers (TUI
+      // patch/approval cards, OTel, plugins) re-paint the original session.
+      //
+      // Republished events get a synthetic `replay:<original>:<n>` runId so
+      // the bus-journal recorder skips them (see runtime.ts) — replay never
+      // pollutes the journal with phantom runs.
+      const live = rest.includes('--live');
+      // --speed N: wall-clock pacing multiplier passed to M38 replay() (0 =
+      // as fast as possible). Default 0 because the journal renderer
+      // is not a live demo by default.
+      const { value: rawSpeed, rest: rest2 } = extractFlag(
+        rest.filter((t) => t !== '--live'),
+        '--speed',
+      );
+      const speed = rawSpeed ? Number(rawSpeed) : 0;
+      if (rawSpeed && (!Number.isFinite(speed) || speed < 0)) {
+        console.log('usage: /replay [--live] [--speed <n≥0>] [runId]');
+        return true;
+      }
+      const ref = rest2.join(' ').trim();
+      const journal = rt.journal();
+      if (ref === '') {
+        const recent = journal.recentRunIds(20);
+        if (recent.length === 0) {
+          console.log('no recorded runs');
+          return true;
+        }
+        console.log(bold('recent runs'));
+        for (const r of recent) {
+          const ts = new Date(r.lastAt).toISOString();
+          console.log(`  ${dim(ts)}  ${r.runId}  ${dim(`(${r.events} events)`)}`);
+        }
+        return true;
+      }
+      const stream = journal.replayBus(ref);
+      if (stream.length === 0) {
+        console.log(`no events for ${ref}`);
+        return true;
+      }
+      if (live) {
+        // Re-emit through the bus so live subscribers (TUI, OTel) re-paint.
+        const { replay, fixtureSource } = await import('./ui/replay');
+        const replayRunId = `replay:${ref}:${Date.now().toString(36)}`;
+        // Rewrite each event's runId so the journal recorder filters them
+        // (see the `replay:` guard in runtime.ts). The original payload is
+        // otherwise preserved verbatim — kind, ids, timestamps unchanged.
+        const events = stream.map((row) => ({ ...row.event, runId: replayRunId }));
+        const source = fixtureSource(events);
+        const { count } = await replay(source, replayRunId, rt.bus, { speed });
+        console.log(dim(`re-emitted ${count} events as ${replayRunId}`));
+        return true;
+      }
+      const start = stream[0]?.at ?? 0;
+      for (const row of stream) {
+        const dt = (row.at - start).toString().padStart(5);
+        const summary = summarizeBusEvent(row.event);
+        console.log(`  ${dim(`+${dt}ms`)}  ${cyan(row.kind.padEnd(18))}  ${summary}`);
+      }
+      console.log(dim(`replayed ${stream.length} events`));
+      return true;
+    }
+    case '/think': {
+      // Reasoning visibility toggle (M28). `/think` with no arg shows the
+      // current mode; `/think off|summary|trace` updates it. NEVER shows
+      // raw model CoT — the renderer in cognition/reasoning.ts only formats
+      // structured ReasoningNode events Archon itself emits.
+      const next = arg.trim();
+      if (next === '') {
+        console.log(`think mode: ${session.reasoningMode}`);
+      } else if (next === 'off' || next === 'summary' || next === 'trace') {
+        session.reasoningMode = next;
+        console.log(`think mode: ${next}`);
+      } else {
+        console.log('usage: /think [off|summary|trace]');
+      }
+      return true;
+    }
     case '/doctor':
       await cmdDoctor(rt);
       return true;
@@ -453,6 +748,333 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       const [name, ...more] = rest;
       if (!name) console.log('usage: /tool <name> [json-input]');
       else await cmdTool(rt, name, more.join(' ').trim() || undefined);
+      return true;
+    }
+    case '/workflow': {
+      // Drive named workflows (M33). The registry owns suspended-run state;
+      // `/workflow resume <runId> [json]` continues a paused run.
+      const [sub, ...more] = rest;
+      if (!sub || sub === 'list' || sub === 'status') {
+        const defs = rt.workflows.list();
+        if (defs.length === 0) {
+          console.log('no workflows registered');
+        } else {
+          console.log(bold(`workflows (${defs.length})`));
+          for (const d of defs) console.log(`  ${cyan(d.id)}  ${dim(d.description)}`);
+        }
+        const susp = rt.workflows.suspendedRuns();
+        if (susp.length > 0) {
+          console.log(bold(`suspended (${susp.length})`));
+          for (const s of susp) console.log(`  ${s.runId}  ${dim(`${s.workflowId} @ ${s.stepId}: ${s.reason}`)}`);
+        }
+        return true;
+      }
+      if (sub === 'run') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /workflow run <id> [json-input]');
+          return true;
+        }
+        const rawInput = more.slice(1).join(' ').trim();
+        let input: unknown = {};
+        if (rawInput) {
+          try {
+            input = JSON.parse(rawInput);
+          } catch (e) {
+            console.log(`invalid JSON input: ${msg(e)}`);
+            return true;
+          }
+        }
+        const out = await rt.workflows.run(id, input);
+        if (!out) {
+          console.log(`no such workflow: ${id}`);
+          return true;
+        }
+        const { runId, result } = out;
+        console.log(bold(`${id} → run ${runId}`));
+        if (result.suspended) {
+          console.log(`  suspended at ${result.suspended.stepId}: ${result.suspended.reason}`);
+          console.log(dim(`  resume with: /workflow resume ${runId} {...}`));
+        } else if (result.ok) {
+          console.log(`  ${cyan('ok')}  ${dim(JSON.stringify(result.output))}`);
+        } else {
+          console.log(`  ${dim('failed at')} ${result.failedAt}: ${result.error}`);
+        }
+        return true;
+      }
+      if (sub === 'resume') {
+        const runId = more[0];
+        if (!runId) {
+          console.log('usage: /workflow resume <runId> [json-resolution]');
+          return true;
+        }
+        const rawResolution = more.slice(1).join(' ').trim();
+        let resolution: Record<string, unknown> = {};
+        if (rawResolution) {
+          try {
+            const parsed: unknown = JSON.parse(rawResolution);
+            if (typeof parsed !== 'object' || parsed === null) {
+              console.log('resolution must be a JSON object');
+              return true;
+            }
+            resolution = parsed as Record<string, unknown>;
+          } catch (e) {
+            console.log(`invalid JSON resolution: ${msg(e)}`);
+            return true;
+          }
+        }
+        const result = await rt.workflows.resume(runId, resolution);
+        if (!result) {
+          console.log(`no suspended run: ${runId}`);
+          return true;
+        }
+        if (result.suspended) {
+          console.log(`  re-suspended at ${result.suspended.stepId}: ${result.suspended.reason}`);
+        } else if (result.ok) {
+          console.log(`  ${cyan('ok')}  ${dim(JSON.stringify(result.output))}`);
+        } else {
+          console.log(`  ${dim('failed at')} ${result.failedAt}: ${result.error}`);
+        }
+        return true;
+      }
+      console.log('usage: /workflow [list|run <id> [json]|resume <runId> [json]]');
+      return true;
+    }
+    case '/council': {
+      // Council planner (M34). Runs the configured planner alongside an
+      // offline scaffold cross-check, synthesises a winner, prints the
+      // score breakdown. No fs/network beyond the planner's own calls.
+      if (!arg) {
+        console.log('usage: /council <goal>');
+        return true;
+      }
+      const { runCouncilCommand } = await import('./cognition/council-command');
+      try {
+        const report = await runCouncilCommand(rt, arg);
+        const { outcome, voters, llmPlanning } = report;
+        if (!llmPlanning) {
+          console.log(dim('no LLM planner configured — single-voter council (scaffold only)'));
+        }
+        console.log(bold(`winner: ${outcome.winner.planner}`));
+        console.log(`  ${dim(outcome.rationale)}`);
+        console.log(`  ${dim(`agreement=${outcome.agreement}/${voters.length} · total=$${outcome.totalCostUsd.toFixed(4)}`)}`);
+        console.log(bold(`voters (${voters.length})`));
+        for (const v of voters) {
+          const isWinner = v.name === outcome.winner.planner;
+          const marker = isWinner ? cyan('★') : ' ';
+          const stepCount = v.plan.plan.steps.length;
+          const checkCount = v.plan.checks.length;
+          console.log(`  ${marker} ${v.name}  ${dim(`${stepCount} steps · ${checkCount} checks · $${v.costUsd.toFixed(4)}`)}`);
+        }
+        console.log(bold('plan:'));
+        for (const step of outcome.winner.change.tasks) console.log(`  • ${step.text}`);
+      } catch (e) {
+        console.log(`council failed: ${msg(e)}`);
+      }
+      return true;
+    }
+    case '/mcp': {
+      // Inspect the v2 MCP authorization surface (M30) and the read-only tools
+      // Archon exposes to inbound MCP clients (M31). All read-only — `tools`
+      // lists the bound surface; `list`/`status` shows the policy allowlist;
+      // `check` dry-runs `authorizeV2(mcp:<server>:<tool>)`.
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const sub = words[0] ?? 'list';
+      const policy = rt.policy();
+      if (sub === 'tools') {
+        const { archonReadOnlyTools } = await import('./services/mcp/archon-tools');
+        const tools = archonReadOnlyTools(rt);
+        console.log(bold(`archon read-only tools (${tools.length})`));
+        for (const t of tools) console.log(`  ${cyan(t.desc.name)}  ${dim(t.desc.description ?? '')}`);
+        console.log(dim('every tool is mutating=false; mutating tools require explicit mutatingEnabled per ADR-0015'));
+        return true;
+      }
+      if (sub === 'servers') {
+        // Configured outbound MCP servers from `.archon/mcp.yaml` (M30). Each
+        // line also annotates the policy verdict for the namespace, so the
+        // user can see at a glance whether a configured server is callable.
+        const servers = rt.mcp.servers;
+        if (servers.length === 0) {
+          console.log(dim('no servers configured · add .archon/mcp.yaml or grant mcp:* in policy.yaml'));
+          return true;
+        }
+        console.log(bold(`mcp servers (${servers.length})`));
+        for (const s of servers) {
+          const grants = policy.v2Allowlist('mcp').filter((g) => g === '*' || g === s.id || g.startsWith(`${s.id}:`));
+          const grant = grants.length === 0 ? dim('(no grants)') : grants.join(', ');
+          const argv = s.args && s.args.length > 0 ? ` ${s.args.join(' ')}` : '';
+          console.log(`  ${cyan(s.id)}  ${dim(`${s.command}${argv}`)}  ${grant}`);
+        }
+        return true;
+      }
+      if (sub === 'list' || sub === 'status') {
+        const allow = policy.v2Allowlist('mcp');
+        if (allow.length === 0) {
+          console.log('no mcp grants (default-deny per ADR-0015)');
+        } else {
+          console.log(bold(`mcp grants (${allow.length})`));
+          for (const entry of allow) console.log(`  ${cyan(entry)}`);
+        }
+        // Show every v2 namespace at a glance so the user sees the surface area.
+        const ns = policy.v2Namespaces();
+        if (ns.length > 0) {
+          console.log(bold('v2 namespaces'));
+          for (const n of ns) {
+            const list = policy.v2Allowlist(n);
+            console.log(`  ${n}: ${list.length === 0 ? dim('(deny)') : list.join(', ')}`);
+          }
+        }
+        return true;
+      }
+      if (sub === 'check') {
+        const target = words[1];
+        if (!target) {
+          console.log('usage: /mcp check <server>:<tool>');
+          return true;
+        }
+        const verdict = await rt.authorizeV2(`mcp:${target}`);
+        console.log(`${target}: ${verdict === 'allow' ? cyan('allow') : 'deny'}`);
+        return true;
+      }
+      console.log('usage: /mcp [list|tools|servers|check <server>:<tool>]');
+      return true;
+    }
+    case '/lsp': {
+      // LSP read-only surface (M39). Inspectable without spawning a real
+      // LSP client — each subcommand calls the runtime-bound handlers and
+      // prints the same shape an editor would receive over JSON-RPC.
+      const { archonLspHandlers } = await import('./services/lsp/archon-handlers');
+      const handlers = archonLspHandlers(rt);
+      const [sub, ...more] = rest;
+      const known = ['blastRadius', 'explain', 'violations'] as const;
+      if (!sub || sub === 'list') {
+        console.log(bold(`archon-lsp methods (${known.length})`));
+        console.log(`  ${cyan('archon/blastRadius')}  ${dim('downstream impact of a file/symbol')}`);
+        console.log(`  ${cyan('archon/explain')}      ${dim('one-hop neighborhood of a symbol')}`);
+        console.log(`  ${cyan('archon/violations')}   ${dim('architecture diagnostics (LSP severity)')}`);
+        console.log(dim('workspace/executeCommand routes to the same three (archon.* names)'));
+        return true;
+      }
+      if (sub === 'blast') {
+        const path = more[0];
+        if (!path) {
+          console.log('usage: /lsp blast <path>');
+          return true;
+        }
+        try {
+          const out = await handlers.blastRadius({ path });
+          console.log(`${cyan(path)} → ${out.files.length} file(s) · ${out.symbols.length} downstream symbol(s)`);
+          for (const f of out.files.slice(0, 30)) console.log(`  ${f}`);
+          if (out.files.length > 30) console.log(dim(`  …${out.files.length - 30} more`));
+        } catch (e) {
+          console.log(`lsp blast failed: ${msg(e)}`);
+        }
+        return true;
+      }
+      if (sub === 'explain') {
+        const symbol = more.join(' ').trim();
+        if (!symbol) {
+          console.log('usage: /lsp explain <symbol>');
+          return true;
+        }
+        try {
+          const out = await handlers.explain({ symbol });
+          console.log(out.summary);
+          for (const n of out.neighbours.slice(0, 20)) console.log(`  ${dim('·')} ${n}`);
+          if (out.neighbours.length > 20) console.log(dim(`  …${out.neighbours.length - 20} more`));
+        } catch (e) {
+          console.log(`lsp explain failed: ${msg(e)}`);
+        }
+        return true;
+      }
+      if (sub === 'violations') {
+        const path = more[0];
+        const out = await handlers.violations(path ? { path } : {});
+        if (out.length === 0) {
+          console.log(dim(path ? `no findings under ${path}` : 'no findings'));
+          return true;
+        }
+        const SEV: Record<number, string> = { 1: 'error', 2: 'warn ', 3: 'info ', 4: 'hint ' };
+        console.log(bold(`diagnostics (${out.length})`));
+        for (const d of out) console.log(`  ${dim(SEV[d.severity] ?? '?')}  ${d.message}`);
+        return true;
+      }
+      console.log('usage: /lsp [list|blast <path>|explain <symbol>|violations [path]]');
+      return true;
+    }
+    case '/spec': {
+      // OpenSpec change-folder UX (M29 / ADR-0013). Plans land under
+      // openspec/changes/<id>/ via the broker; this command inspects them.
+      // Validation is the same TS validator the planner uses, so /spec
+      // validate is the canonical "is this plan well-formed" gate.
+      const [sub, ...more] = rest;
+      const { specStatus, specDiff, specValidate, specArchive } = await import('./cognition/openspec/spec-commands');
+      if (!sub || sub === 'status') {
+        const status = await specStatus(rt.specs);
+        if (status.active.length === 0 && status.archived.length === 0) {
+          console.log('no specs yet · plans land under openspec/changes/<id>/');
+          return true;
+        }
+        if (status.active.length > 0) {
+          console.log(bold(`active (${status.active.length})`));
+          for (const id of status.active) console.log(`  ${id}`);
+        }
+        if (status.archived.length > 0) {
+          console.log(bold(`archived (${status.archived.length})`));
+          for (const id of status.archived) console.log(`  ${dim(id)}`);
+        }
+        return true;
+      }
+      if (sub === 'diff') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec diff <id>');
+          return true;
+        }
+        const d = await specDiff(rt.specs, id);
+        if (!d) {
+          console.log(`no such change: ${id}`);
+          return true;
+        }
+        console.log(bold(`${d.id} — ${d.completedTasks}/${d.totalTasks} tasks done`));
+        for (const c of d.byContext) {
+          console.log(`  ${cyan(c.context)}  +${c.added} ~${c.modified} -${c.removed}`);
+        }
+        return true;
+      }
+      if (sub === 'validate') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec validate <id>');
+          return true;
+        }
+        const v = await specValidate(rt.specs, id);
+        if (!v) {
+          console.log(`no such change: ${id}`);
+          return true;
+        }
+        if (v.ok) {
+          console.log(`${id}: ok`);
+          return true;
+        }
+        console.log(`${id}: ${v.issues.filter((i) => i.severity === 'error').length} error(s)`);
+        for (const i of v.issues) {
+          const sev = i.severity === 'error' ? '!' : '·';
+          console.log(`  ${sev} ${i.file}: ${i.message}`);
+        }
+        return true;
+      }
+      if (sub === 'archive') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec archive <id>');
+          return true;
+        }
+        const r = await specArchive(rt.specs, id);
+        console.log(r.ok ? `archived ${id}` : `${id}: ${r.reason ?? 'archive failed'}`);
+        return true;
+      }
+      console.log('usage: /spec [status|diff <id>|validate <id>|archive <id>]');
       return true;
     }
     default:

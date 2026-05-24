@@ -274,6 +274,76 @@ describe('shell dispatch', () => {
       rt.close();
     }
   });
+
+  it('/think toggles reasoning visibility on the session (M28)', async () => {
+    const rt = await runtime();
+    const session = newSession();
+    const log = captured();
+    try {
+      // No-arg shows the current mode (default off).
+      await dispatch(rt, '/think', session);
+      expect(text(log)).toContain('think mode: off');
+      log.mockClear();
+
+      // Valid mode updates the session.
+      await dispatch(rt, '/think summary', session);
+      expect(session.reasoningMode).toBe('summary');
+      expect(text(log)).toContain('think mode: summary');
+      log.mockClear();
+
+      // Invalid mode is rejected and the session is left untouched.
+      await dispatch(rt, '/think loud', session);
+      expect(session.reasoningMode).toBe('summary');
+      expect(text(log)).toContain('usage: /think');
+    } finally {
+      rt.close();
+    }
+  });
+});
+
+describe('shell /replay --live', () => {
+  it('re-emits journaled events through the bus under a `replay:` runId', async () => {
+    const rt = await runtime();
+    try {
+      // Seed the journal with a tiny recorded run — runId is real (no
+      // `replay:` prefix) so the recorder writes it through normally.
+      rt.journal().appendBusEvent({ kind: 'turn.start', runId: 'r-fake', at: 100, goal: 'demo' });
+      rt.journal().appendBusEvent({ kind: 'turn.done', runId: 'r-fake', at: 200, ok: true });
+
+      // Subscribe to the bus BEFORE dispatching so we don't miss the re-emit.
+      const seen: { kind: string; runId: string }[] = [];
+      const collect = (async () => {
+        for await (const e of rt.bus.subscribe()) {
+          if (e.runId.startsWith('replay:')) seen.push({ kind: e.kind, runId: e.runId });
+          if (seen.length >= 2) break;
+        }
+      })();
+
+      const log = captured();
+      expect(await dispatch(rt, '/replay --live r-fake')).toBe(true);
+      await collect;
+
+      // Two replayed events seen on the bus, both stamped with a synthetic
+      // runId so the journal recorder ignores them (otherwise we'd loop).
+      expect(seen).toHaveLength(2);
+      expect(seen[0]?.kind).toBe('turn.start');
+      expect(seen[0]?.runId.startsWith('replay:r-fake:')).toBe(true);
+      expect(text(log)).toContain('re-emitted 2 events as replay:r-fake:');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('reports "no events" for a runId that was never journaled', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      await dispatch(rt, '/replay --live ghost');
+      expect(text(log)).toContain('no events for ghost');
+    } finally {
+      rt.close();
+    }
+  });
 });
 
 describe('shell conversational /ask', () => {
@@ -319,7 +389,7 @@ describe('shell conversational /ask', () => {
 describe('shell tab-completion', () => {
   it('completes a slash-command prefix to its matches', () => {
     expect(completeShell('/pl')).toEqual([['/plan', '/plugins'], '/pl']);
-    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skill', '/skills', '/sh'], '/s']);
+    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/spec', '/skill', '/skills', '/sh'], '/s']);
     expect(completeShell('/sk')).toEqual([['/skill', '/skills'], '/sk']);
     expect(completeShell('/sh')).toEqual([['/sh'], '/sh']);
   });

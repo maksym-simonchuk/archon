@@ -54,9 +54,12 @@ export class ApprovalBroker {
         kind: 'approval.request',
         runId: req.runId,
         at: Date.now(),
+        approvalId: id,
         capability: req.capability,
         target: req.target,
         blastRadius: req.blastRadius,
+        ...(req.reason ? { reason: req.reason } : {}),
+        ...(req.preview ? { preview: req.preview } : {}),
       });
     });
   }
@@ -66,9 +69,14 @@ export class ApprovalBroker {
     const cb = this.pending.get(approvalId);
     if (!cb) return false;
     this.pending.delete(approvalId);
-    this.bus.publish({ kind: 'approval.resolve', runId, at: Date.now(), decision });
+    this.bus.publish({ kind: 'approval.resolve', runId, at: Date.now(), approvalId, decision });
     cb(decision);
     return true;
+  }
+
+  /** Inspect every pending request without resolving — for the TUI to render the queue. */
+  pendingIds(): string[] {
+    return [...this.pending.keys()];
   }
 
   /** Outstanding approval count — useful for shutdown checks. */

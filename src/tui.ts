@@ -5,6 +5,7 @@ import { format } from 'node:util';
 import { loadComputeCore } from './core/compute';
 import { buildRuntime } from './runtime';
 import { isWatchable } from './sensing/fs-watcher';
+import { newRunId } from './services/event-bus';
 import { applyCompletion, atTokenAtCursor, type AtToken, rankFilesByQuery } from './tui-completion';
 import {
   bufferLines,
@@ -248,6 +249,14 @@ const DESCRIPTIONS: Record<string, string> = {
   '/status': 'task journal (· taskId for replay)',
   '/recap': 'per-run digest + health trend',
   '/cost': 'session spend vs budget',
+  '/think': 'reasoning visibility off|summary|trace (never raw CoT)',
+  '/approve': 'resolve a pending approval card (allow|deny [id])',
+  '/diff': 'inspect & stage the queued patch (toggle e.h|apply|discard)',
+  '/replay': 'recorded bus stream · --live re-emits through the bus (no arg: list recent runs)',
+  '/workflow': 'drive registered DAG workflows (list|run|resume)',
+  '/council': 'multi-voter planner — LLM + offline scaffold cross-check (M34)',
+  '/mcp': 'inspect MCP authorization surface (list|tools|servers|check)',
+  '/lsp': 'inspect LSP read-only surface (list|blast|explain|violations)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',
@@ -294,6 +303,69 @@ const BOX = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' } a
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+// ── Approval card (M32) ─────────────────────────────────────────────────────
+//
+// Pure builder so the rendering is testable without spinning up a TUI session.
+// Returns [] when there's nothing pending; otherwise a 5-row yellow-bordered
+// card sized to `cols`. The card is informational — `/approve <a|d>` (handled
+// in shell.ts) is what actually flips the broker.
+
+export interface ApprovalCardInput {
+  approvalId: string;
+  capability: string;
+  target: string;
+  blastRadius: number;
+  reason?: string;
+  preview?: string;
+}
+
+export function buildApprovalCardRows(card: ApprovalCardInput | undefined, more: number, cols: number): string[] {
+  if (!card || cols < 4) return [];
+  const span = Math.max(0, cols - 2);
+  const innerW = Math.max(0, cols - 2);
+  const title = `${bold('⏵ approval requested')} ${dim(`(${card.capability} · ${card.blastRadius} files)`)}`;
+  const target = card.target;
+  const reasonTxt = card.reason ? ` · ${card.reason}` : '';
+  const moreTxt = more > 0 ? ` · +${more} more` : '';
+  const hint = `${dim(`/approve allow ${card.approvalId.slice(0, 12)}…`)}${dim(reasonTxt)}${dim(moreTxt)}`;
+  return [
+    yellow(`╭${'─'.repeat(span)}╮`),
+    yellow('│') + padTo(clip(' ' + title, innerW), innerW) + yellow('│'),
+    yellow('│') + padTo(clip(' ' + target, innerW), innerW) + yellow('│'),
+    yellow('│') + padTo(clip(' ' + hint, innerW), innerW) + yellow('│'),
+    yellow(`╰${'─'.repeat(span)}╯`),
+  ];
+}
+
+// ── Patch card (M27) ────────────────────────────────────────────────────────
+//
+// Pure builder for the staged-patch summary above the input box. Cyan border
+// so it's visually distinct from the yellow approval card. Returns [] when
+// nothing is staged so the renderer can short-circuit the height budget.
+
+export interface PatchCardInput {
+  patchId: string;
+  files: string[];
+  totalHunks: number;
+  acceptedHunks: number;
+}
+
+export function buildPatchCardRows(card: PatchCardInput | undefined, cols: number): string[] {
+  if (!card || cols < 4) return [];
+  const span = Math.max(0, cols - 2);
+  const innerW = Math.max(0, cols - 2);
+  const headline = `${bold('⏵ patch staged')} ${dim(`(${card.acceptedHunks}/${card.totalHunks} hunks · ${card.files.length} files)`)}`;
+  const filesLine = card.files.slice(0, 3).join(' · ') + (card.files.length > 3 ? dim(` · +${card.files.length - 3}`) : '');
+  const hint = dim('/diff status · /diff toggle e.h · /diff apply · /diff discard');
+  return [
+    cyan(`╭${'─'.repeat(span)}╮`),
+    cyan('│') + padTo(clip(' ' + headline, innerW), innerW) + cyan('│'),
+    cyan('│') + padTo(clip(' ' + filesLine, innerW), innerW) + cyan('│'),
+    cyan('│') + padTo(clip(' ' + hint, innerW), innerW) + cyan('│'),
+    cyan(`╰${'─'.repeat(span)}╯`),
+  ];
+}
+
 // ── Alt-screen control ───────────────────────────────────────────────────────
 
 const ENTER_ALT = '\x1b[?1049h';
@@ -327,7 +399,32 @@ export async function startTui(): Promise<void> {
   const transcript: string[] = [...BANNER];
   let pending = ''; // partial last line (mid-stream, no newline yet)
   let scrollOffset = 0; // 0 = pinned to bottom
-  let streamedChars = 0; // model output captured during the current `thinking…` turn
+  let streamedChars = 0; // characters captured from stdout while busy — drives a fallback estimate when no bus deltas have arrived yet
+  // Bus-driven turn telemetry (M26). The TUI subscribes to the runtime bus
+  // (set up below) and tallies per-turn token counts. We track BOTH the live
+  // delta-byte count (for a sub-second activity feel) and the precise
+  // tokens.usage figures (final, from the provider). The header still shows
+  // the router's cumulative totals; this is for the live status row only.
+  let turnDeltaChars = 0; // characters arriving via `token.delta` events this turn
+  let turnTokensIn = 0;
+  let turnTokensOut = 0;
+  let turnCostUsd = 0;
+  // Approval card (M32). The bus subscriber accumulates requests here; the
+  // renderer paints the oldest as a card above the input box. `/approve a|d`
+  // resolves it through the broker which removes it from this list via the
+  // matching `approval.resolve` event.
+  interface PendingApproval {
+    approvalId: string;
+    capability: string;
+    target: string;
+    blastRadius: number;
+    reason?: string;
+    preview?: string;
+  }
+  let pendingApprovals: PendingApproval[] = [];
+  // Staged patch card (M27). Updated from patch.staged / patch.toggled /
+  // patch.resolved / patch.discarded events. `undefined` = nothing staged.
+  let stagedPatch: PatchCardInput | undefined;
   // Claude-Code-style turn markers: the first output line of every turn is tagged
   // so it renders with a `⏺` glyph. `awaitingResponse` arms the next non-empty
   // pushed line as that start; `responseStarts` keeps the marks for scrollback.
@@ -441,6 +538,69 @@ export async function startTui(): Promise<void> {
     }, 16);
   };
 
+  // ── Bus subscriber (M26): the TUI watches the v2 event bus to drive its
+  // live token meter / cost row / future approval cards. We start a single
+  // long-lived subscriber that updates per-turn counters and triggers a
+  // re-render whenever counts change. The bus carries no authority — this is
+  // pure observation. The subscriber ends when `rt.close()` is called (TUI
+  // cleanup), which surfaces as a clean iterator end.
+  let busSubAlive = true;
+  void (async (): Promise<void> => {
+    try {
+      for await (const e of rt.bus.subscribe()) {
+        if (!busSubAlive) break;
+        // Only events from the currently-running turn move the meter; older
+        // events (replay backfill, plugin emissions) are still observed but
+        // don't kick the activity counters.
+        const live = session.currentRunId && e.runId === session.currentRunId;
+        if (live && e.kind === 'token.delta') {
+          turnDeltaChars += e.text.length;
+          scheduleRender();
+        } else if (live && e.kind === 'tokens.usage') {
+          turnTokensIn += e.usage.inputTokens;
+          turnTokensOut += e.usage.outputTokens;
+          turnCostUsd += e.usage.costUsd;
+          scheduleRender();
+        } else if (e.kind === 'approval.request') {
+          // The broker is asking the user — render an inline card with the
+          // approvalId so /approve allow|deny [id] can resolve it.
+          pendingApprovals.push({
+            approvalId: e.approvalId,
+            capability: e.capability,
+            target: e.target,
+            blastRadius: e.blastRadius,
+            ...(e.reason ? { reason: e.reason } : {}),
+            ...(e.preview ? { preview: e.preview } : {}),
+          });
+          scheduleRender();
+        } else if (e.kind === 'approval.resolve') {
+          // Drop the matching pending entry — the broker has unblocked.
+          pendingApprovals = pendingApprovals.filter((p) => p.approvalId !== e.approvalId);
+          scheduleRender();
+        } else if (e.kind === 'patch.staged') {
+          stagedPatch = { patchId: e.patchId, files: e.files, totalHunks: e.hunks, acceptedHunks: e.hunks };
+          scheduleRender();
+        } else if (e.kind === 'patch.toggled' && stagedPatch && stagedPatch.patchId === e.patchId) {
+          stagedPatch = {
+            ...stagedPatch,
+            acceptedHunks: Math.max(0, stagedPatch.acceptedHunks + (e.accepted ? 1 : -1)),
+          };
+          scheduleRender();
+        } else if ((e.kind === 'patch.resolved' || e.kind === 'patch.discarded') && stagedPatch?.patchId === e.patchId) {
+          stagedPatch = undefined;
+          scheduleRender();
+        } else if (e.kind === 'bus.lost') {
+          // Surface back-pressure drops so the user knows the meter may be
+          // under-counting (rare; only triggers under sustained 10k+ ev/s).
+          pushTranscript(dim(`[bus] dropped ${e.dropped} events`));
+          scheduleRender();
+        }
+      }
+    } catch {
+      // A subscriber crash must never affect the engine — silent on purpose.
+    }
+  })();
+
   // Kick off the project-file scan now that `scheduleRender` exists. Node 20.12+
   // exposes `parentPath` on Dirent; the project targets Node ≥20 so we rely on
   // it directly.
@@ -494,12 +654,21 @@ export async function startTui(): Promise<void> {
   const busyStatus = (): string => {
     const secs = Math.max(0, Math.round((Date.now() - busyStart) / 1000));
     const parts = [`${secs}s`];
-    if (busyLabel === 'thinking…' && streamedChars > 0) {
-      const tok = Math.round(streamedChars / 4);
-      parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
+    if (busyLabel === 'thinking…') {
+      // Once the provider's `tokens.usage` event has landed for this turn we
+      // surface real numbers (Claude-Code style: `↓ input  ↑ output`). Until
+      // then a single approximate output count from streaming deltas keeps
+      // the counter visibly moving so the user knows something's happening.
+      if (turnTokensOut > 0 || turnTokensIn > 0) {
+        parts.push(`↓${fmtTokens(turnTokensIn)} ↑${fmtTokens(turnTokensOut)}`);
+      } else {
+        const tok = Math.round((turnDeltaChars || streamedChars) / 4);
+        if (tok > 0) parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
+      }
+      if (turnCostUsd > 0) parts.push(`$${turnCostUsd.toFixed(4)}`);
     }
     parts.push('esc to interrupt');
-    return parts.join(' · '); // plain separator: the caller wraps the whole tail in dim
+    return parts.join(' · ');
   };
 
   // The activity line lives ABOVE the input box (Claude-Code style), so the box
@@ -629,6 +798,15 @@ export async function startTui(): Promise<void> {
       return clip(`  ${marker} ${label}  ${dim(DESCRIPTIONS[cmd] ?? '')}`, cols);
     });
 
+  // Approval card (M32). Delegates to the module-level `buildApprovalCardRows`
+  // so the renderer stays testable in isolation.
+  const approvalCardRows = (cols: number): string[] =>
+    buildApprovalCardRows(pendingApprovals[0], Math.max(0, pendingApprovals.length - 1), cols);
+
+  // Patch card (M27). Same idea, separate stack so the two cards can render
+  // simultaneously when both a write approval and a staged patch are live.
+  const patchCardRows = (cols: number): string[] => buildPatchCardRows(stagedPatch, cols);
+
   const render = (): void => {
     const cols = stdout.columns ?? 80;
     const rows = stdout.rows ?? 24;
@@ -648,17 +826,38 @@ export async function startTui(): Promise<void> {
       belowBox = menuRows(cols, menu, menuStart, items.length);
     }
 
+    // Approval card + patch card sit above the input — added to the chrome
+    // height budget so they don't collide with the transcript. Five rows each
+    // when present; both can coexist when there's a write awaiting approval
+    // for a separately-staged patch.
+    const approvalRows = approvalCardRows(cols);
+    const patchRows = patchCardRows(cols);
+
     // Build the input box rows up front so the variable height feeds into the
     // height budget. The box itself = box-top(1) + boxRows + box-bottom(1).
     const box = searchMode ? searchBox(cols) : inputBox(cols);
     const boxH = 2 + box.rows.length;
 
     // Fixed chrome = header(1) + box(boxH) + footer(1); plus statusH (activity
-    // line and/or queued-type-ahead preview); plus belowBox.
+    // line and/or queued-type-ahead preview); plus belowBox; plus the approval
+    // card if a request is pending (M32). The card is non-negotiable — it
+    // displaces transcript rows, but never the input or the menu.
     const statusH = (busy ? 1 : 0) + (queued !== null ? 1 : 0);
-    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length;
+    let approvalH = approvalRows.length;
+    let patchH = patchRows.length;
+    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length - approvalH - patchH;
     if (transcriptHeight < 1) {
       belowBox = [];
+      transcriptHeight = rows - 2 - boxH - statusH - approvalH - patchH;
+    }
+    if (transcriptHeight < 1) {
+      // Pathological tiny terminal: drop the patch card first (it's
+      // informational), then the approval card, so the input stays usable.
+      patchH = 0;
+      transcriptHeight = rows - 2 - boxH - statusH - approvalH;
+    }
+    if (transcriptHeight < 1) {
+      approvalH = 0;
       transcriptHeight = Math.max(1, rows - 2 - boxH - statusH);
     }
 
@@ -725,6 +924,12 @@ export async function startTui(): Promise<void> {
     if (busy) frame.push(statusRow(cols));
     if (queued !== null) frame.push(clip(dim(` ⏎ queued — ${queued}`), cols));
 
+    // Cards sit above the input box so the user reads them in the same glance
+    // as the prompt they're about to type into. Patch first (cyan), approval
+    // last (yellow → bottom = most urgent).
+    if (patchH > 0) for (const r of patchRows) frame.push(r);
+    if (approvalH > 0) for (const r of approvalRows) frame.push(r);
+
     // Framed input box: ╭──╮ / │ … │ × boxRows / ╰──╯. The cursor sits on the
     // box row that matches the buffer's cursor row (Claude-Code multi-line look).
     const span = Math.max(0, cols - 2);
@@ -769,6 +974,17 @@ export async function startTui(): Promise<void> {
     busyLabel = line.startsWith('/ask') || !line.startsWith('/') ? 'thinking…' : 'working…';
     busyStart = Date.now();
     streamedChars = 0;
+    // Mint a turn runId + reset per-turn telemetry. The bus subscriber (set up
+    // below) updates these counters as `token.delta` and `tokens.usage` arrive.
+    // Threaded through the session so `cmdAsk` can hand it to streamComplete.
+    session.currentRunId = newRunId();
+    turnDeltaChars = 0;
+    turnTokensIn = 0;
+    turnTokensOut = 0;
+    turnCostUsd = 0;
+    // Mark the start of this turn on the bus too — replay reconstructs the
+    // session timeline from `turn.start` boundaries.
+    rt.bus.publish({ kind: 'turn.start', runId: session.currentRunId, at: Date.now(), goal: line });
     awaitingResponse = true; // the next captured output line begins this turn's response
     render();
     try {
@@ -791,6 +1007,16 @@ export async function startTui(): Promise<void> {
         awaitingResponse = false;
         pushTranscript(dim('context cleared'));
       }
+      // Publish the turn boundary so OTel/replay can close the span.
+      if (session.currentRunId) {
+        rt.bus.publish({
+          kind: 'turn.done',
+          runId: session.currentRunId,
+          at: Date.now(),
+          ok: true,
+        });
+      }
+      session.currentRunId = undefined;
       busy = false;
       render();
       // A line composed during the turn (type-ahead) auto-sends now.
@@ -1120,6 +1346,10 @@ export async function startTui(): Promise<void> {
     stdin.pause();
     restoreCapture();
     realWrite(`${PASTE_MODE_OFF}${SHOW_CURSOR}${LEAVE_ALT}`);
+    // Stop the bus subscriber first — `rt.close()` then closes the bus, which
+    // ends the iterator cleanly. The flag flips the loop into an early break
+    // even if a publish lands in the same tick as close.
+    busSubAlive = false;
     rt.close();
     saveHistory(historyFile, history);
   };
