@@ -333,6 +333,35 @@ export function buildApprovalCardRows(card: ApprovalCardInput | undefined, more:
   ];
 }
 
+// ── Patch card (M27) ────────────────────────────────────────────────────────
+//
+// Pure builder for the staged-patch summary above the input box. Cyan border
+// so it's visually distinct from the yellow approval card. Returns [] when
+// nothing is staged so the renderer can short-circuit the height budget.
+
+export interface PatchCardInput {
+  patchId: string;
+  files: string[];
+  totalHunks: number;
+  acceptedHunks: number;
+}
+
+export function buildPatchCardRows(card: PatchCardInput | undefined, cols: number): string[] {
+  if (!card || cols < 4) return [];
+  const span = Math.max(0, cols - 2);
+  const innerW = Math.max(0, cols - 2);
+  const headline = `${bold('⏵ patch staged')} ${dim(`(${card.acceptedHunks}/${card.totalHunks} hunks · ${card.files.length} files)`)}`;
+  const filesLine = card.files.slice(0, 3).join(' · ') + (card.files.length > 3 ? dim(` · +${card.files.length - 3}`) : '');
+  const hint = dim('/diff status · /diff toggle e.h · /diff apply · /diff discard');
+  return [
+    cyan(`╭${'─'.repeat(span)}╮`),
+    cyan('│') + padTo(clip(' ' + headline, innerW), innerW) + cyan('│'),
+    cyan('│') + padTo(clip(' ' + filesLine, innerW), innerW) + cyan('│'),
+    cyan('│') + padTo(clip(' ' + hint, innerW), innerW) + cyan('│'),
+    cyan(`╰${'─'.repeat(span)}╯`),
+  ];
+}
+
 // ── Alt-screen control ───────────────────────────────────────────────────────
 
 const ENTER_ALT = '\x1b[?1049h';
@@ -389,6 +418,9 @@ export async function startTui(): Promise<void> {
     preview?: string;
   }
   let pendingApprovals: PendingApproval[] = [];
+  // Staged patch card (M27). Updated from patch.staged / patch.toggled /
+  // patch.resolved / patch.discarded events. `undefined` = nothing staged.
+  let stagedPatch: PatchCardInput | undefined;
   // Claude-Code-style turn markers: the first output line of every turn is tagged
   // so it renders with a `⏺` glyph. `awaitingResponse` arms the next non-empty
   // pushed line as that start; `responseStarts` keeps the marks for scrollback.
@@ -540,6 +572,18 @@ export async function startTui(): Promise<void> {
         } else if (e.kind === 'approval.resolve') {
           // Drop the matching pending entry — the broker has unblocked.
           pendingApprovals = pendingApprovals.filter((p) => p.approvalId !== e.approvalId);
+          scheduleRender();
+        } else if (e.kind === 'patch.staged') {
+          stagedPatch = { patchId: e.patchId, files: e.files, totalHunks: e.hunks, acceptedHunks: e.hunks };
+          scheduleRender();
+        } else if (e.kind === 'patch.toggled' && stagedPatch && stagedPatch.patchId === e.patchId) {
+          stagedPatch = {
+            ...stagedPatch,
+            acceptedHunks: Math.max(0, stagedPatch.acceptedHunks + (e.accepted ? 1 : -1)),
+          };
+          scheduleRender();
+        } else if ((e.kind === 'patch.resolved' || e.kind === 'patch.discarded') && stagedPatch?.patchId === e.patchId) {
+          stagedPatch = undefined;
           scheduleRender();
         } else if (e.kind === 'bus.lost') {
           // Surface back-pressure drops so the user knows the meter may be
@@ -755,6 +799,10 @@ export async function startTui(): Promise<void> {
   const approvalCardRows = (cols: number): string[] =>
     buildApprovalCardRows(pendingApprovals[0], Math.max(0, pendingApprovals.length - 1), cols);
 
+  // Patch card (M27). Same idea, separate stack so the two cards can render
+  // simultaneously when both a write approval and a staged patch are live.
+  const patchCardRows = (cols: number): string[] => buildPatchCardRows(stagedPatch, cols);
+
   const render = (): void => {
     const cols = stdout.columns ?? 80;
     const rows = stdout.rows ?? 24;
@@ -774,9 +822,12 @@ export async function startTui(): Promise<void> {
       belowBox = menuRows(cols, menu, menuStart, items.length);
     }
 
-    // Approval card sits above the input — added to the chrome height budget
-    // so it doesn't collide with the transcript. Five rows when present.
+    // Approval card + patch card sit above the input — added to the chrome
+    // height budget so they don't collide with the transcript. Five rows each
+    // when present; both can coexist when there's a write awaiting approval
+    // for a separately-staged patch.
     const approvalRows = approvalCardRows(cols);
+    const patchRows = patchCardRows(cols);
 
     // Build the input box rows up front so the variable height feeds into the
     // height budget. The box itself = box-top(1) + boxRows + box-bottom(1).
@@ -789,13 +840,19 @@ export async function startTui(): Promise<void> {
     // displaces transcript rows, but never the input or the menu.
     const statusH = (busy ? 1 : 0) + (queued !== null ? 1 : 0);
     let approvalH = approvalRows.length;
-    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length - approvalH;
+    let patchH = patchRows.length;
+    let transcriptHeight = rows - 2 - boxH - statusH - belowBox.length - approvalH - patchH;
     if (transcriptHeight < 1) {
       belowBox = [];
+      transcriptHeight = rows - 2 - boxH - statusH - approvalH - patchH;
+    }
+    if (transcriptHeight < 1) {
+      // Pathological tiny terminal: drop the patch card first (it's
+      // informational), then the approval card, so the input stays usable.
+      patchH = 0;
       transcriptHeight = rows - 2 - boxH - statusH - approvalH;
     }
     if (transcriptHeight < 1) {
-      // Pathological tiny terminal: drop the card too so the input stays usable.
       approvalH = 0;
       transcriptHeight = Math.max(1, rows - 2 - boxH - statusH);
     }
@@ -863,8 +920,10 @@ export async function startTui(): Promise<void> {
     if (busy) frame.push(statusRow(cols));
     if (queued !== null) frame.push(clip(dim(` ⏎ queued — ${queued}`), cols));
 
-    // Approval card sits above the input box so the user reads it in the same
-    // glance as the prompt they're about to type into.
+    // Cards sit above the input box so the user reads them in the same glance
+    // as the prompt they're about to type into. Patch first (cyan), approval
+    // last (yellow → bottom = most urgent).
+    if (patchH > 0) for (const r of patchRows) frame.push(r);
     if (approvalH > 0) for (const r of approvalRows) frame.push(r);
 
     // Framed input box: ╭──╮ / │ … │ × boxRows / ╰──╯. The cursor sits on the
