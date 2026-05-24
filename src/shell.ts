@@ -117,6 +117,7 @@ export const COMMANDS = [
   '/replay',
   '/spec',
   '/workflow',
+  '/mcp',
   '/doctor',
   '/memory',
   '/promote',
@@ -165,6 +166,7 @@ const SHELL_HELP = `commands:
   /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
+  /mcp [list|check <server>:<tool>]  list configured MCP grants · check authorizeV2 (M30)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -274,6 +276,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
+  if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp check'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -799,6 +802,45 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         return true;
       }
       console.log('usage: /workflow [list|run <id> [json]|resume <runId> [json]]');
+      return true;
+    }
+    case '/mcp': {
+      // Inspect the v2 MCP authorization surface (M30). Read-only: lists the
+      // policy allowlist (default empty) and lets the user dry-run an
+      // authorizeV2 check before they wire an actual server.
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const sub = words[0] ?? 'list';
+      const policy = rt.policy();
+      if (sub === 'list' || sub === 'status') {
+        const allow = policy.v2Allowlist('mcp');
+        if (allow.length === 0) {
+          console.log('no mcp grants (default-deny per ADR-0015)');
+        } else {
+          console.log(bold(`mcp grants (${allow.length})`));
+          for (const entry of allow) console.log(`  ${cyan(entry)}`);
+        }
+        // Show every v2 namespace at a glance so the user sees the surface area.
+        const ns = policy.v2Namespaces();
+        if (ns.length > 0) {
+          console.log(bold('v2 namespaces'));
+          for (const n of ns) {
+            const list = policy.v2Allowlist(n);
+            console.log(`  ${n}: ${list.length === 0 ? dim('(deny)') : list.join(', ')}`);
+          }
+        }
+        return true;
+      }
+      if (sub === 'check') {
+        const target = words[1];
+        if (!target) {
+          console.log('usage: /mcp check <server>:<tool>');
+          return true;
+        }
+        const verdict = await rt.authorizeV2(`mcp:${target}`);
+        console.log(`${target}: ${verdict === 'allow' ? cyan('allow') : 'deny'}`);
+        return true;
+      }
+      console.log('usage: /mcp [list|check <server>:<tool>]');
       return true;
     }
     case '/spec': {

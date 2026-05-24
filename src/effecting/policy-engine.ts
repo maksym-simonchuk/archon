@@ -202,6 +202,20 @@ export class PolicyEngine {
    * wildcard (`*`). The engine NEVER allows what the policy hasn't explicitly
    * granted — tighten-only, matching the v0 evaluator's discipline. See ADR-0015.
    */
+  /**
+   * Read-only view of the v2 capability allowlist for one namespace. Used by
+   * `/mcp`, `/lsp` and similar surfaces to render what's currently grantable
+   * without exposing the whole `PolicyDocument` to the shell.
+   */
+  v2Allowlist(namespace: string): string[] {
+    return this.doc.v2_capabilities?.[namespace]?.slice() ?? [];
+  }
+
+  /** Every v2 namespace that appears in the policy doc (in insertion order). */
+  v2Namespaces(): string[] {
+    return Object.keys(this.doc.v2_capabilities ?? {});
+  }
+
   evaluateV2(capability: string): 'allow' | 'deny' {
     const colon = capability.indexOf(':');
     if (colon === -1) return 'deny';

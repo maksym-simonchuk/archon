@@ -254,6 +254,7 @@ const DESCRIPTIONS: Record<string, string> = {
   '/diff': 'inspect & stage the queued patch (toggle e.h|apply|discard)',
   '/replay': 'replay a recorded bus stream (no arg: list recent runs)',
   '/workflow': 'drive registered DAG workflows (list|run|resume)',
+  '/mcp': 'inspect MCP authorization surface (list|check)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',
