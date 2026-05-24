@@ -117,6 +117,7 @@ export const COMMANDS = [
   '/replay',
   '/spec',
   '/workflow',
+  '/council',
   '/mcp',
   '/doctor',
   '/memory',
@@ -166,6 +167,7 @@ const SHELL_HELP = `commands:
   /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
+  /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
   /mcp [list|check <server>:<tool>]  list configured MCP grants · check authorizeV2 (M30)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
@@ -802,6 +804,39 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         return true;
       }
       console.log('usage: /workflow [list|run <id> [json]|resume <runId> [json]]');
+      return true;
+    }
+    case '/council': {
+      // Council planner (M34). Runs the configured planner alongside an
+      // offline scaffold cross-check, synthesises a winner, prints the
+      // score breakdown. No fs/network beyond the planner's own calls.
+      if (!arg) {
+        console.log('usage: /council <goal>');
+        return true;
+      }
+      const { runCouncilCommand } = await import('./cognition/council-command');
+      try {
+        const report = await runCouncilCommand(rt, arg);
+        const { outcome, voters, llmPlanning } = report;
+        if (!llmPlanning) {
+          console.log(dim('no LLM planner configured — single-voter council (scaffold only)'));
+        }
+        console.log(bold(`winner: ${outcome.winner.planner}`));
+        console.log(`  ${dim(outcome.rationale)}`);
+        console.log(`  ${dim(`agreement=${outcome.agreement}/${voters.length} · total=$${outcome.totalCostUsd.toFixed(4)}`)}`);
+        console.log(bold(`voters (${voters.length})`));
+        for (const v of voters) {
+          const isWinner = v.name === outcome.winner.planner;
+          const marker = isWinner ? cyan('★') : ' ';
+          const stepCount = v.plan.plan.steps.length;
+          const checkCount = v.plan.checks.length;
+          console.log(`  ${marker} ${v.name}  ${dim(`${stepCount} steps · ${checkCount} checks · $${v.costUsd.toFixed(4)}`)}`);
+        }
+        console.log(bold('plan:'));
+        for (const step of outcome.winner.change.tasks) console.log(`  • ${step.text}`);
+      } catch (e) {
+        console.log(`council failed: ${msg(e)}`);
+      }
       return true;
     }
     case '/mcp': {
