@@ -273,9 +273,16 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // event, which opens sqlite on demand. sqlite write errors are swallowed
   // (disk full, permission, schema mismatch) so a misbehaving disk can't
   // stall cognition; the loss is observable only by missing journal rows.
+  //
+  // `replay:` runId prefix: events the M38 `/replay --live` command publishes
+  // through the bus carry a synthetic `replay:<original>:<n>` runId so they
+  // are skipped here (otherwise replaying would loop the journal — record →
+  // re-emit → record → …). Real events never use the prefix; the synthesis
+  // happens only inside the /replay --live adapter.
   void (async (): Promise<void> => {
     for await (const e of bus.subscribe()) {
       if (!busRecorderAlive) break;
+      if (e.runId.startsWith('replay:')) continue;
       try {
         journal().appendBusEvent(e);
       } catch {

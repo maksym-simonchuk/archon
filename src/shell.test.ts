@@ -301,6 +301,51 @@ describe('shell dispatch', () => {
   });
 });
 
+describe('shell /replay --live', () => {
+  it('re-emits journaled events through the bus under a `replay:` runId', async () => {
+    const rt = await runtime();
+    try {
+      // Seed the journal with a tiny recorded run — runId is real (no
+      // `replay:` prefix) so the recorder writes it through normally.
+      rt.journal().appendBusEvent({ kind: 'turn.start', runId: 'r-fake', at: 100, goal: 'demo' });
+      rt.journal().appendBusEvent({ kind: 'turn.done', runId: 'r-fake', at: 200, ok: true });
+
+      // Subscribe to the bus BEFORE dispatching so we don't miss the re-emit.
+      const seen: { kind: string; runId: string }[] = [];
+      const collect = (async () => {
+        for await (const e of rt.bus.subscribe()) {
+          if (e.runId.startsWith('replay:')) seen.push({ kind: e.kind, runId: e.runId });
+          if (seen.length >= 2) break;
+        }
+      })();
+
+      const log = captured();
+      expect(await dispatch(rt, '/replay --live r-fake')).toBe(true);
+      await collect;
+
+      // Two replayed events seen on the bus, both stamped with a synthetic
+      // runId so the journal recorder ignores them (otherwise we'd loop).
+      expect(seen).toHaveLength(2);
+      expect(seen[0]?.kind).toBe('turn.start');
+      expect(seen[0]?.runId.startsWith('replay:r-fake:')).toBe(true);
+      expect(text(log)).toContain('re-emitted 2 events as replay:r-fake:');
+    } finally {
+      rt.close();
+    }
+  });
+
+  it('reports "no events" for a runId that was never journaled', async () => {
+    const rt = await runtime();
+    const log = captured();
+    try {
+      await dispatch(rt, '/replay --live ghost');
+      expect(text(log)).toContain('no events for ghost');
+    } finally {
+      rt.close();
+    }
+  });
+});
+
 describe('shell conversational /ask', () => {
   const model: ModelSpec = {
     id: 'm',

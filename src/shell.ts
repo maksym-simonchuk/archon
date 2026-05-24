@@ -164,7 +164,7 @@ const SHELL_HELP = `commands:
   /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
   /approve [allow|deny] [id]  resolve a pending approval card (M32)
   /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
-  /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
+  /replay [--live] [--speed <n>] [runId]  recorded bus stream — --live re-emits through the bus (M38)
   /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
   /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
@@ -279,6 +279,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
   if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp check'];
+  if (head === '/replay' && words.length === 2) return ['/replay --live', '/replay --speed'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -631,9 +632,26 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       // Replay a recorded bus stream (M38). Reads from TaskJournal's
       // bus_journal table — every event Archon emitted for the run, in
       // append order. The shell prints a compact one-line-per-event view;
-      // the journal preserves the full event so future surfaces (UI replay,
-      // OTel re-export) can reconstruct anything.
-      const ref = arg.trim();
+      // `--live` republishes events through `rt.bus` so subscribers (TUI
+      // patch/approval cards, OTel, plugins) re-paint the original session.
+      //
+      // Republished events get a synthetic `replay:<original>:<n>` runId so
+      // the bus-journal recorder skips them (see runtime.ts) — replay never
+      // pollutes the journal with phantom runs.
+      const live = rest.includes('--live');
+      // --speed N: wall-clock pacing multiplier passed to M38 replay() (0 =
+      // as fast as possible). Default 0 because the journal renderer
+      // is not a live demo by default.
+      const { value: rawSpeed, rest: rest2 } = extractFlag(
+        rest.filter((t) => t !== '--live'),
+        '--speed',
+      );
+      const speed = rawSpeed ? Number(rawSpeed) : 0;
+      if (rawSpeed && (!Number.isFinite(speed) || speed < 0)) {
+        console.log('usage: /replay [--live] [--speed <n≥0>] [runId]');
+        return true;
+      }
+      const ref = rest2.join(' ').trim();
       const journal = rt.journal();
       if (ref === '') {
         const recent = journal.recentRunIds(20);
@@ -651,6 +669,19 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       const stream = journal.replayBus(ref);
       if (stream.length === 0) {
         console.log(`no events for ${ref}`);
+        return true;
+      }
+      if (live) {
+        // Re-emit through the bus so live subscribers (TUI, OTel) re-paint.
+        const { replay, fixtureSource } = await import('./ui/replay');
+        const replayRunId = `replay:${ref}:${Date.now().toString(36)}`;
+        // Rewrite each event's runId so the journal recorder filters them
+        // (see the `replay:` guard in runtime.ts). The original payload is
+        // otherwise preserved verbatim — kind, ids, timestamps unchanged.
+        const events = stream.map((row) => ({ ...row.event, runId: replayRunId }));
+        const source = fixtureSource(events);
+        const { count } = await replay(source, replayRunId, rt.bus, { speed });
+        console.log(dim(`re-emitted ${count} events as ${replayRunId}`));
         return true;
       }
       const start = stream[0]?.at ?? 0;
