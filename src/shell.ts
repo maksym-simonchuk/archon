@@ -61,6 +61,12 @@ export interface ShellSession {
   abort?: AbortController;
   /** Dirty-set snapshot threaded across `/watch` ticks (M22) so each tick reports a delta. */
   watchDirty: ReadonlySet<string>;
+  /**
+   * Runtime v2 correlation id for the active turn. The TUI mints this on
+   * submit and threads it through every router/tool call so bus events from
+   * one turn can be grouped (and replayed) together. Undefined between turns.
+   */
+  currentRunId?: string;
 }
 export const newSession = (): ShellSession => ({ askHistory: [], watchDirty: new Set() });
 
@@ -302,7 +308,15 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         const controller = new AbortController();
         session.abort = controller;
         try {
-          const answer = await cmdAsk(rt, arg, session.askHistory.slice(-ASK_CONTEXT_TURNS), controller.signal);
+          // Thread the surrounding turn's runId so the router's bus events
+          // group with the rest of the turn's activity.
+          const answer = await cmdAsk(
+            rt,
+            arg,
+            session.askHistory.slice(-ASK_CONTEXT_TURNS),
+            controller.signal,
+            session.currentRunId,
+          );
           if (answer) session.askHistory.push({ question: arg, answer });
         } finally {
           session.abort = undefined;

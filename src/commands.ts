@@ -190,6 +190,8 @@ export async function cmdAsk(
   question: string,
   history: readonly AskTurn[] = [],
   signal?: AbortSignal,
+  /** Optional v2 correlation id — the surrounding turn's runId — so bus events tie back to it. */
+  runId?: string,
 ): Promise<string> {
   if (!rt.llmPlanning) {
     console.log('ask: no LLM provider configured — set a provider key (see `archon doctor`)');
@@ -206,6 +208,7 @@ export async function cmdAsk(
     { taskClass: 'summarize', prompt, maxTokens: 1024 },
     (chunk) => process.stdout.write(chunk),
     signal,
+    runId,
   );
   process.stdout.write('\n');
   console.log(aborted ? `— ${modelId} (cancelled)` : `— ${modelId} ($${costUsd.toFixed(4)})`);

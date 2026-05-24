@@ -5,6 +5,7 @@ import { format } from 'node:util';
 import { loadComputeCore } from './core/compute';
 import { buildRuntime } from './runtime';
 import { isWatchable } from './sensing/fs-watcher';
+import { newRunId } from './services/event-bus';
 import { applyCompletion, atTokenAtCursor, type AtToken, rankFilesByQuery } from './tui-completion';
 import {
   bufferLines,
@@ -327,7 +328,16 @@ export async function startTui(): Promise<void> {
   const transcript: string[] = [...BANNER];
   let pending = ''; // partial last line (mid-stream, no newline yet)
   let scrollOffset = 0; // 0 = pinned to bottom
-  let streamedChars = 0; // model output captured during the current `thinking…` turn
+  let streamedChars = 0; // characters captured from stdout while busy — drives a fallback estimate when no bus deltas have arrived yet
+  // Bus-driven turn telemetry (M26). The TUI subscribes to the runtime bus
+  // (set up below) and tallies per-turn token counts. We track BOTH the live
+  // delta-byte count (for a sub-second activity feel) and the precise
+  // tokens.usage figures (final, from the provider). The header still shows
+  // the router's cumulative totals; this is for the live status row only.
+  let turnDeltaChars = 0; // characters arriving via `token.delta` events this turn
+  let turnTokensIn = 0;
+  let turnTokensOut = 0;
+  let turnCostUsd = 0;
   // Claude-Code-style turn markers: the first output line of every turn is tagged
   // so it renders with a `⏺` glyph. `awaitingResponse` arms the next non-empty
   // pushed line as that start; `responseStarts` keeps the marks for scrollback.
@@ -441,6 +451,41 @@ export async function startTui(): Promise<void> {
     }, 16);
   };
 
+  // ── Bus subscriber (M26): the TUI watches the v2 event bus to drive its
+  // live token meter / cost row / future approval cards. We start a single
+  // long-lived subscriber that updates per-turn counters and triggers a
+  // re-render whenever counts change. The bus carries no authority — this is
+  // pure observation. The subscriber ends when `rt.close()` is called (TUI
+  // cleanup), which surfaces as a clean iterator end.
+  let busSubAlive = true;
+  void (async (): Promise<void> => {
+    try {
+      for await (const e of rt.bus.subscribe()) {
+        if (!busSubAlive) break;
+        // Only events from the currently-running turn move the meter; older
+        // events (replay backfill, plugin emissions) are still observed but
+        // don't kick the activity counters.
+        const live = session.currentRunId && e.runId === session.currentRunId;
+        if (live && e.kind === 'token.delta') {
+          turnDeltaChars += e.text.length;
+          scheduleRender();
+        } else if (live && e.kind === 'tokens.usage') {
+          turnTokensIn += e.usage.inputTokens;
+          turnTokensOut += e.usage.outputTokens;
+          turnCostUsd += e.usage.costUsd;
+          scheduleRender();
+        } else if (e.kind === 'bus.lost') {
+          // Surface back-pressure drops so the user knows the meter may be
+          // under-counting (rare; only triggers under sustained 10k+ ev/s).
+          pushTranscript(dim(`[bus] dropped ${e.dropped} events`));
+          scheduleRender();
+        }
+      }
+    } catch {
+      // A subscriber crash must never affect the engine — silent on purpose.
+    }
+  })();
+
   // Kick off the project-file scan now that `scheduleRender` exists. Node 20.12+
   // exposes `parentPath` on Dirent; the project targets Node ≥20 so we rely on
   // it directly.
@@ -494,12 +539,21 @@ export async function startTui(): Promise<void> {
   const busyStatus = (): string => {
     const secs = Math.max(0, Math.round((Date.now() - busyStart) / 1000));
     const parts = [`${secs}s`];
-    if (busyLabel === 'thinking…' && streamedChars > 0) {
-      const tok = Math.round(streamedChars / 4);
-      parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
+    if (busyLabel === 'thinking…') {
+      // Once the provider's `tokens.usage` event has landed for this turn we
+      // surface real numbers (Claude-Code style: `↓ input  ↑ output`). Until
+      // then a single approximate output count from streaming deltas keeps
+      // the counter visibly moving so the user knows something's happening.
+      if (turnTokensOut > 0 || turnTokensIn > 0) {
+        parts.push(`↓${fmtTokens(turnTokensIn)} ↑${fmtTokens(turnTokensOut)}`);
+      } else {
+        const tok = Math.round((turnDeltaChars || streamedChars) / 4);
+        if (tok > 0) parts.push(`≈${tok >= 1000 ? `${(tok / 1000).toFixed(1)}k` : tok} tok`);
+      }
+      if (turnCostUsd > 0) parts.push(`$${turnCostUsd.toFixed(4)}`);
     }
     parts.push('esc to interrupt');
-    return parts.join(' · '); // plain separator: the caller wraps the whole tail in dim
+    return parts.join(' · ');
   };
 
   // The activity line lives ABOVE the input box (Claude-Code style), so the box
@@ -769,6 +823,17 @@ export async function startTui(): Promise<void> {
     busyLabel = line.startsWith('/ask') || !line.startsWith('/') ? 'thinking…' : 'working…';
     busyStart = Date.now();
     streamedChars = 0;
+    // Mint a turn runId + reset per-turn telemetry. The bus subscriber (set up
+    // below) updates these counters as `token.delta` and `tokens.usage` arrive.
+    // Threaded through the session so `cmdAsk` can hand it to streamComplete.
+    session.currentRunId = newRunId();
+    turnDeltaChars = 0;
+    turnTokensIn = 0;
+    turnTokensOut = 0;
+    turnCostUsd = 0;
+    // Mark the start of this turn on the bus too — replay reconstructs the
+    // session timeline from `turn.start` boundaries.
+    rt.bus.publish({ kind: 'turn.start', runId: session.currentRunId, at: Date.now(), goal: line });
     awaitingResponse = true; // the next captured output line begins this turn's response
     render();
     try {
@@ -791,6 +856,16 @@ export async function startTui(): Promise<void> {
         awaitingResponse = false;
         pushTranscript(dim('context cleared'));
       }
+      // Publish the turn boundary so OTel/replay can close the span.
+      if (session.currentRunId) {
+        rt.bus.publish({
+          kind: 'turn.done',
+          runId: session.currentRunId,
+          at: Date.now(),
+          ok: true,
+        });
+      }
+      session.currentRunId = undefined;
       busy = false;
       render();
       // A line composed during the turn (type-ahead) auto-sends now.
@@ -1120,6 +1195,10 @@ export async function startTui(): Promise<void> {
     stdin.pause();
     restoreCapture();
     realWrite(`${PASTE_MODE_OFF}${SHOW_CURSOR}${LEAVE_ALT}`);
+    // Stop the bus subscriber first — `rt.close()` then closes the bus, which
+    // ends the iterator cleanly. The flag flips the loop into an early break
+    // even if a publish lands in the same tick as close.
+    busSubAlive = false;
     rt.close();
     saveHistory(historyFile, history);
   };
