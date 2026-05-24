@@ -109,6 +109,24 @@ describe('CapabilityBroker (M3)', () => {
     if (!read.ok) expect(read.error.code).toBe('fs.read_failed');
   });
 
+  it('asks (refuses, no rm) when fs.delete is requested under the safe profile', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    await writeFile(join(dir, 'doomed.ts'), 'x');
+    const result = await broker.fsDelete('doomed.ts', { reason: 'remove a stale artifact' });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.code).toBe('policy.ask');
+    expect(await exists(join(dir, 'doomed.ts'))).toBe(true);
+  });
+
+  it('denies fs.delete that would escape the repo tree', async () => {
+    dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
+    const { broker } = makeBroker(dir);
+    const escaped = await broker.fsDelete('../outside.ts', { reason: 'escape attempt' });
+    expect(escaped.ok).toBe(false);
+    if (!escaped.ok) expect(escaped.error.message).toContain('escapes');
+  });
+
   it('denies writes that escape via an in-repo symlink (realpath, not lexical)', async () => {
     dir = await mkdtemp(join(tmpdir(), 'archon-broker-'));
     outside = await mkdtemp(join(tmpdir(), 'archon-outside-'));

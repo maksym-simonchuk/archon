@@ -19,8 +19,9 @@ active_profile: trusted
 profiles:
   trusted:
     allow:
-      - { action: fs.read,  target: "**" }
-      - { action: fs.write, target: "openspec/**" }
+      - { action: fs.read,   target: "**" }
+      - { action: fs.write,  target: "openspec/**" }
+      - { action: fs.delete, target: "openspec/changes/**" }
 `);
 
 const brokerFor = (root: string): CapabilityBroker =>
@@ -77,7 +78,7 @@ describe('BrokerSpecStore', () => {
     expect(result?.ok).toBe(true);
   });
 
-  it('archives an active change and surfaces it under archived', async () => {
+  it('archives an active change, surfaces it under archived, and removes the active copy', async () => {
     const store = new BrokerSpecStore(brokerFor(root));
     const { files } = changeFromPlanSummary({
       id: 'arch-me',
@@ -90,6 +91,8 @@ describe('BrokerSpecStore', () => {
 
     const archived = await store.listArchived();
     expect(archived).toContain('arch-me');
+    const active = await store.listActive();
+    expect(active).not.toContain('arch-me');
   });
 });
 

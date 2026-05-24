@@ -92,7 +92,6 @@ export class BrokerSpecStore implements SpecStore {
   async archiveChange(id: string): Promise<void> {
     const current = await this.readChange(id);
     if (!current) return;
-    // Copy to archive/.
     const archBase = `${ARCHIVE_DIR}/${id}`;
     const co = Object.keys(current).map((p) => `${archBase}/${p}`);
     for (const [rel, content] of Object.entries(current)) {
@@ -101,10 +100,15 @@ export class BrokerSpecStore implements SpecStore {
         blastRadius: { files: co, symbols: [], escapesRepo: false },
       });
     }
-    // Note: the broker has no fsDelete capability yet — the active folder
-    // stays until a future M removes it. Listing favours archive on a name
-    // collision, but `listActive` continues to see it; cognition layers can
-    // filter against `listArchived` to deduplicate.
+    // Remove the active folder — recursive delete through the broker (gated
+    // by `fs.delete`). Best-effort: a policy refusal leaves the active copy
+    // around (listActive will still see it), but the archive write succeeded
+    // so the historical record is complete.
+    await this.broker.fsDelete(`${CHANGES_DIR}/${id}`, {
+      reason: `spec.archive.cleanup[${id}]`,
+      recursive: true,
+      blastRadius: { files: co, symbols: [], escapesRepo: false },
+    });
   }
 }
 
