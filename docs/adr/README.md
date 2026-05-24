@@ -27,3 +27,4 @@ decision = add a new ADR and mark the old one `superseded`.
 | 0017 | Bus journal + replay                               | accepted |
 | 0018 | BrokerSpecStore + planner emit                     | accepted |
 | 0019 | `broker.fsDelete` capability                       | accepted |
+| 0020 | MCP read-only surface + LSP runtime binding        | accepted |
