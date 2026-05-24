@@ -250,6 +250,8 @@ const DESCRIPTIONS: Record<string, string> = {
   '/recap': 'per-run digest + health trend',
   '/cost': 'session spend vs budget',
   '/think': 'reasoning visibility off|summary|trace (never raw CoT)',
+  '/approve': 'resolve a pending approval card (allow|deny [id])',
+  '/diff': 'inspect & stage the queued patch (toggle e.h|apply|discard)',
   '/model': 'provider routing table',
   '/doctor': 'runtime readiness',
   '/memory': 'records · graph · recall',

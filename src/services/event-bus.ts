@@ -38,6 +38,10 @@ export type ArchonEvent =
   | { kind: 'approval.request'; runId: string; at: number; approvalId: string; capability: string; target: string; blastRadius: number; reason?: string; preview?: string }
   | { kind: 'approval.resolve'; runId: string; at: number; approvalId: string; decision: 'allow' | 'deny' }
   | { kind: 'verdict'; runId: string; at: number; ok: boolean; summary: string }
+  | { kind: 'patch.staged'; runId: string; at: number; patchId: string; files: string[]; hunks: number }
+  | { kind: 'patch.toggled'; runId: string; at: number; patchId: string; editIndex: number; hunkIndex: number; accepted: boolean }
+  | { kind: 'patch.resolved'; runId: string; at: number; patchId: string; writes: number; rejected: number; errors: number }
+  | { kind: 'patch.discarded'; runId: string; at: number; patchId: string }
   | { kind: 'bus.lost'; runId: string; at: number; dropped: number };
 
 /** A predicate over events; lets a subscriber pre-filter rather than fan-out everything. */

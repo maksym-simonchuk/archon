@@ -113,6 +113,7 @@ export const COMMANDS = [
   '/model',
   '/think',
   '/approve',
+  '/diff',
   '/doctor',
   '/memory',
   '/promote',
@@ -157,6 +158,7 @@ const SHELL_HELP = `commands:
   /model           provider routing table (models + per-task chain)
   /think [off|summary|trace]  reasoning visibility (never raw provider CoT)
   /approve [allow|deny] [id]  resolve a pending approval card (M32)
+  /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -223,6 +225,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/watch' && words.length === 2) return ['/watch --loop', '/watch --stop'];
   if (head === '/think' && words.length === 2) return ['/think off', '/think summary', '/think trace'];
   if (head === '/approve' && words.length === 2) return ['/approve allow', '/approve deny'];
+  if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -477,6 +480,98 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       }
       const ok = rt.approval.resolve(id, decision, session.currentRunId ?? id);
       console.log(ok ? `${decision} ${id}` : `no such approval: ${id}`);
+      return true;
+    }
+    case '/diff': {
+      // Staged-patch UX (M27/M32). The store is populated by cognition; this
+      // command lets the user inspect, toggle hunks, then apply through the
+      // broker. The store itself does no I/O — it owns staged state only.
+      const words = arg.trim().split(/\s+/).filter(Boolean);
+      const sub = words[0] ?? '';
+      const snap = rt.patches.current();
+
+      if (sub === '' || sub === 'status') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const totalH = snap.set.edits.reduce((n, e) => n + e.diff.hunks.length, 0);
+        const accH = snap.set.accepted.reduce((n, row) => n + row.filter(Boolean).length, 0);
+        console.log(bold(`patch ${snap.patchId} — ${accH}/${totalH} hunks accepted`));
+        for (let ei = 0; ei < snap.set.edits.length; ei++) {
+          const e = snap.set.edits[ei];
+          const acc = snap.set.accepted[ei];
+          if (!e || !acc) continue;
+          console.log(dim(`  ── ${e.path}`));
+          for (let hi = 0; hi < e.diff.hunks.length; hi++) {
+            const h = e.diff.hunks[hi];
+            if (!h) continue;
+            const mark = acc[hi] ? cyan('✓') : dim('·');
+            console.log(`  ${mark} [${ei}.${hi}] @@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`);
+          }
+        }
+        console.log(dim('toggle: /diff toggle e.h    apply: /diff apply    discard: /diff discard'));
+        return true;
+      }
+
+      if (sub === 'toggle') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const ref = words[1] ?? '';
+        const m = /^(\d+)\.(\d+)$/.exec(ref);
+        if (!m) {
+          console.log('usage: /diff toggle <editIndex>.<hunkIndex>');
+          return true;
+        }
+        const e = parseInt(m[1] as string, 10);
+        const h = parseInt(m[2] as string, 10);
+        const next = rt.patches.toggle(e, h);
+        if (next === undefined) console.log(`no such hunk: ${e}.${h}`);
+        else console.log(`hunk ${e}.${h}: ${next ? 'accepted' : 'rejected'}`);
+        return true;
+      }
+
+      if (sub === 'apply') {
+        if (!snap) {
+          console.log('no patch staged');
+          return true;
+        }
+        const result = rt.patches.resolve();
+        if (!result) {
+          console.log('no patch staged');
+          return true;
+        }
+        const { resolved } = result;
+        const broker = rt.brokerAt(rt.root);
+        const allPaths = Object.keys(resolved.writes);
+        let wrote = 0;
+        const failures: string[] = [];
+        for (const [path, content] of Object.entries(resolved.writes)) {
+          // Blast radius = every co-applied write. `escapesRepo` stays false —
+          // the broker's path-containment guard rejects any path that would.
+          const w = await broker.fsWrite(path, content, {
+            reason: '/diff apply',
+            blastRadius: { files: allPaths, symbols: [], escapesRepo: false },
+          });
+          if (w.ok) wrote++;
+          else failures.push(`${path}: ${w.error.message}`);
+        }
+        console.log(`wrote ${wrote}/${Object.keys(resolved.writes).length} files`);
+        if (resolved.rejected.length > 0) console.log(dim(`rejected hunks queued for follow-up: ${resolved.rejected.length}`));
+        if (resolved.errors.length > 0) for (const e of resolved.errors) console.log(`error: ${e.path}: ${e.reason}`);
+        if (failures.length > 0) for (const f of failures) console.log(`write-fail: ${f}`);
+        return true;
+      }
+
+      if (sub === 'discard') {
+        const ok = rt.patches.discard();
+        console.log(ok ? 'patch discarded' : 'no patch staged');
+        return true;
+      }
+
+      console.log('usage: /diff [toggle e.h|apply|discard]');
       return true;
     }
     case '/think': {

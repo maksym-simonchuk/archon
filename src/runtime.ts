@@ -17,6 +17,7 @@ import type { BlastRadius, MemoryTier, Profile, Task } from './core/types';
 import { AgentBroker } from './effecting/agent-broker';
 import { ApprovalBroker } from './effecting/approval';
 import { AuditLog } from './effecting/audit-log';
+import { PatchStore } from './effecting/diff/patch-store';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
@@ -141,6 +142,13 @@ export interface Runtime {
    * future MCP relays) resolves through the same queue.
    */
   readonly approval: ApprovalBroker;
+  /**
+   * Patch store (M27/M32). Holds the most recent staged PatchSet so the TUI
+   * can show `/diff` and stage hunks before the broker writes them. The
+   * store itself is authority-free — it decides *what* should be written,
+   * the Capability Broker decides *whether*.
+   */
+  readonly patches: PatchStore;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -169,6 +177,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // on the bus; the TUI's subscriber renders a card and calls back via
   // `approval.resolve`.
   const approval = new ApprovalBroker(bus);
+
+  // Patch store (M27/M32). Cognition stages a PatchSet; the TUI renders
+  // `/diff`; the user toggles hunks; the broker writes the resolved files.
+  // The store does no I/O — it only owns staged state.
+  const patches = new PatchStore(bus);
 
   // Optional OTel exporter (M37). Off by default — only activates if
   // `OTEL_EXPORTER_OTLP_ENDPOINT` is present in the environment. Telemetry is
@@ -477,6 +490,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     policy,
     authorizeV2,
     approval,
+    patches,
     close,
   };
 }
