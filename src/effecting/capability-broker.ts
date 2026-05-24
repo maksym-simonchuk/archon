@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { promisify } from 'node:util';
 import type { BlastRadius, CapabilityRequest, PolicyVerdict } from '../core/types';
@@ -121,6 +121,38 @@ export class CapabilityBroker {
       return ok(await readFile(real, 'utf8'));
     } catch (e) {
       return err({ code: 'fs.read_failed', message: e instanceof Error ? e.message : String(e), cause: e });
+    }
+  }
+
+  /**
+   * Guarded directory listing. Re-uses the `fs.read` capability — listing a
+   * directory is a read of its inode entries. Returns names only (not full
+   * paths), with directories suffixed by `/` so the caller can distinguish.
+   * A missing directory returns an empty list (not an error) so callers can
+   * treat "no openspec/changes yet" uniformly.
+   */
+  async fsList(target: string, opts: FsReadOptions): Promise<Result<string[]>> {
+    const real = await realContainedPath(this.repoRoot, target);
+    if (real === null) {
+      const verdict: PolicyVerdict = {
+        decision: 'deny',
+        rule: 'broker.repo_escape',
+        message: `path escapes the repo tree: ${target}`,
+      };
+      this.record({ action: 'fs.read', target, reason: opts.reason }, verdict, opts.taskId);
+      return err({ code: 'policy.deny', message: verdict.message });
+    }
+    const verdict = await this.request({ action: 'fs.read', target, reason: opts.reason }, opts);
+    if (verdict.decision !== 'allow') {
+      return err({ code: `policy.${verdict.decision}`, message: verdict.message });
+    }
+    try {
+      const entries = await readdir(real, { withFileTypes: true });
+      return ok(entries.map((e) => (e.isDirectory() ? `${e.name}/` : e.name)));
+    } catch (e) {
+      // ENOENT = "not yet" — return empty so callers don't need a special case.
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return ok([]);
+      return err({ code: 'fs.list_failed', message: e instanceof Error ? e.message : String(e), cause: e });
     }
   }
 

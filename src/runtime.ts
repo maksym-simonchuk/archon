@@ -18,6 +18,8 @@ import { AgentBroker } from './effecting/agent-broker';
 import { ApprovalBroker } from './effecting/approval';
 import { AuditLog } from './effecting/audit-log';
 import { PatchStore } from './effecting/diff/patch-store';
+import { BrokerSpecStore } from './cognition/openspec/broker-spec-store';
+import type { SpecStore } from './cognition/openspec/spec-commands';
 import { CapabilityBroker } from './effecting/capability-broker';
 import { loadPolicy, PolicyEngine, type PolicyDocument } from './effecting/policy-engine';
 import { evaluatePreHooks, type PreHookFinding } from './effecting/hooks';
@@ -149,6 +151,14 @@ export interface Runtime {
    * the Capability Broker decides *whether*.
    */
   readonly patches: PatchStore;
+  /**
+   * OpenSpec change store (M29 / ADR-0013). Reads & writes the
+   * `openspec/changes/<id>/` and `openspec/archive/<id>/` trees through the
+   * Capability Broker, so plan-artifact emit is gated by the same policy as
+   * any other write. `/spec status|diff|validate|archive` work against this
+   * instance; the planner also calls `writeChange` after a plan succeeds.
+   */
+  readonly specs: SpecStore;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -222,6 +232,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const brokerAt = (cwd: string, profile: Profile = config.profile): CapabilityBroker =>
     new CapabilityBroker(new PolicyEngine(policyDoc, profile), audit, cwd);
+
+  // OpenSpec spec store (M29). Filesystem-backed; every read/write/list goes
+  // through the broker, so plan-artifact emit is policy-gated like any other
+  // write. Shared across `/spec` and the planner-emit pathway.
+  const specs: SpecStore = new BrokerSpecStore(brokerAt(root));
 
   // A trusted broker narrowed to one agent's declared capabilities (M18). It can
   // only deny actions the agent didn't declare — never widen authority — so the
@@ -514,6 +529,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     authorizeV2,
     approval,
     patches,
+    specs,
     close,
   };
 }

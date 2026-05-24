@@ -257,9 +257,44 @@ export interface PlanReport {
   checks: { name: string; argv: string[] }[];
 }
 
+/**
+ * Emit the plan as an OpenSpec change folder (ADR-0013). The structured
+ * CognitivePlan still drives the executor; this writes a parallel
+ * human-reviewable change under openspec/changes/<id>/ so the plan can be
+ * inspected with `/spec diff` or handed to another reviewer.
+ *
+ * Bus-level: publishes `plan.ready` with the change folder path on success.
+ * Best-effort — a write failure (broker deny, disk error) is swallowed so
+ * the plan UX is never blocked by the artifact pipeline.
+ */
+async function emitOpenSpecChange(rt: Runtime, cog: CognitivePlan): Promise<void> {
+  try {
+    const { changeFromPlanSummary } = await import('./cognition/openspec/broker-spec-store');
+    const { newRunId } = await import('./services/event-bus');
+    const id = cog.plan.taskId.replace(/[^a-z0-9-]+/gi, '-').toLowerCase();
+    const tasks = cog.plan.steps.map((s) => s.intent).filter((t) => t.length > 0);
+    const { files } = changeFromPlanSummary({
+      id,
+      goal: cog.plan.rationale,
+      why: cog.plan.rationale,
+      tasks: tasks.length > 0 ? tasks : ['(plan has no explicit step intents)'],
+    });
+    await rt.specs.writeChange(id, files);
+    rt.bus.publish({
+      kind: 'plan.ready',
+      runId: newRunId(),
+      at: Date.now(),
+      specPath: `openspec/changes/${id}/`,
+    });
+  } catch {
+    // Spec emit is purely additive — never block the plan flow on it.
+  }
+}
+
 export async function cmdPlan(rt: Runtime, goal: string, opts: { skill?: string; json?: boolean } = {}): Promise<void> {
   const task = makeTask(goal, rt.config.profile);
   const cog = await rt.planner().plan(task, await planContext(rt, task, goal, opts.skill));
+  await emitOpenSpecChange(rt, cog);
   if (opts.json) {
     // stdout carries only this document — diagnostics (@file / --skill notes) go
     // to stderr — so `archon plan --json | jq` is safe.

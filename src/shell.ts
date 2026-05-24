@@ -115,6 +115,7 @@ export const COMMANDS = [
   '/approve',
   '/diff',
   '/replay',
+  '/spec',
   '/doctor',
   '/memory',
   '/promote',
@@ -161,6 +162,7 @@ const SHELL_HELP = `commands:
   /approve [allow|deny] [id]  resolve a pending approval card (M32)
   /diff [toggle e.h|apply|discard]  inspect & stage the queued patch (M27)
   /replay [runId]  replay a recorded bus stream · no arg: list recent runs (M38)
+  /spec [status|diff <id>|validate <id>|archive <id>]  OpenSpec change folders (M29)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -268,6 +270,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/think' && words.length === 2) return ['/think off', '/think summary', '/think trace'];
   if (head === '/approve' && words.length === 2) return ['/approve allow', '/approve deny'];
   if (head === '/diff' && words.length === 2) return ['/diff toggle', '/diff apply', '/diff discard'];
+  if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
   if (head === '/policy' && words.length === 2) return ['/policy check'];
@@ -703,6 +706,81 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
       const [name, ...more] = rest;
       if (!name) console.log('usage: /tool <name> [json-input]');
       else await cmdTool(rt, name, more.join(' ').trim() || undefined);
+      return true;
+    }
+    case '/spec': {
+      // OpenSpec change-folder UX (M29 / ADR-0013). Plans land under
+      // openspec/changes/<id>/ via the broker; this command inspects them.
+      // Validation is the same TS validator the planner uses, so /spec
+      // validate is the canonical "is this plan well-formed" gate.
+      const [sub, ...more] = rest;
+      const { specStatus, specDiff, specValidate, specArchive } = await import('./cognition/openspec/spec-commands');
+      if (!sub || sub === 'status') {
+        const status = await specStatus(rt.specs);
+        if (status.active.length === 0 && status.archived.length === 0) {
+          console.log('no specs yet · plans land under openspec/changes/<id>/');
+          return true;
+        }
+        if (status.active.length > 0) {
+          console.log(bold(`active (${status.active.length})`));
+          for (const id of status.active) console.log(`  ${id}`);
+        }
+        if (status.archived.length > 0) {
+          console.log(bold(`archived (${status.archived.length})`));
+          for (const id of status.archived) console.log(`  ${dim(id)}`);
+        }
+        return true;
+      }
+      if (sub === 'diff') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec diff <id>');
+          return true;
+        }
+        const d = await specDiff(rt.specs, id);
+        if (!d) {
+          console.log(`no such change: ${id}`);
+          return true;
+        }
+        console.log(bold(`${d.id} — ${d.completedTasks}/${d.totalTasks} tasks done`));
+        for (const c of d.byContext) {
+          console.log(`  ${cyan(c.context)}  +${c.added} ~${c.modified} -${c.removed}`);
+        }
+        return true;
+      }
+      if (sub === 'validate') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec validate <id>');
+          return true;
+        }
+        const v = await specValidate(rt.specs, id);
+        if (!v) {
+          console.log(`no such change: ${id}`);
+          return true;
+        }
+        if (v.ok) {
+          console.log(`${id}: ok`);
+          return true;
+        }
+        console.log(`${id}: ${v.issues.filter((i) => i.severity === 'error').length} error(s)`);
+        for (const i of v.issues) {
+          const sev = i.severity === 'error' ? '!' : '·';
+          console.log(`  ${sev} ${i.file}: ${i.message}`);
+        }
+        return true;
+      }
+      if (sub === 'archive') {
+        const id = more[0];
+        if (!id) {
+          console.log('usage: /spec archive <id>');
+          return true;
+        }
+        const r = await specArchive(rt.specs, id);
+        console.log(r.ok ? `archived ${id}` : `${id}: ${r.reason ?? 'archive failed'}`);
+        return true;
+      }
+      console.log('usage: /spec [status|diff <id>|validate <id>|archive <id>]');
       return true;
     }
     default:

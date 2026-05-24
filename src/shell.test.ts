@@ -344,7 +344,7 @@ describe('shell conversational /ask', () => {
 describe('shell tab-completion', () => {
   it('completes a slash-command prefix to its matches', () => {
     expect(completeShell('/pl')).toEqual([['/plan', '/plugins'], '/pl']);
-    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/skill', '/skills', '/sh'], '/s']);
+    expect(completeShell('/s')).toEqual([['/simulate', '/status', '/spec', '/skill', '/skills', '/sh'], '/s']);
     expect(completeShell('/sk')).toEqual([['/skill', '/skills'], '/sk']);
     expect(completeShell('/sh')).toEqual([['/sh'], '/sh']);
   });
