@@ -119,6 +119,7 @@ export const COMMANDS = [
   '/workflow',
   '/council',
   '/mcp',
+  '/lsp',
   '/doctor',
   '/memory',
   '/promote',
@@ -169,6 +170,7 @@ const SHELL_HELP = `commands:
   /workflow [list|run <id>|resume <runId> [json]]  drive registered DAG workflows (M33)
   /council <goal>  multi-voter planner — LLM + offline scaffold cross-check, synthesised (M34)
   /mcp [list|tools|servers|check <server>:<tool>]  grants · tools (read-only surface) · servers (mcp.yaml) (M30/M31)
+  /lsp [list|blast <path>|explain <symbol>|violations [path]]  inspect LSP read-only surface (M39)
   /doctor          runtime readiness (planner/keys/state/plugins)
   /memory [list [tier]|graph|goal]  list: records · graph: intelligence layer · goal: recall
   /promote <id>    confirm a memory promotion (the human gate)
@@ -279,6 +281,7 @@ function argCandidates(head: string, words: string[]): string[] {
   if (head === '/spec' && words.length === 2) return ['/spec status', '/spec diff', '/spec validate', '/spec archive'];
   if (head === '/workflow' && words.length === 2) return ['/workflow list', '/workflow run', '/workflow resume'];
   if (head === '/mcp' && words.length === 2) return ['/mcp list', '/mcp tools', '/mcp servers', '/mcp check'];
+  if (head === '/lsp' && words.length === 2) return ['/lsp list', '/lsp blast', '/lsp explain', '/lsp violations'];
   if (head === '/replay' && words.length === 2) return ['/replay --live', '/replay --speed'];
   if (head === '/refactor' && words.length === 2) return ['/refactor --pick', '/refactor --force'];
   if (head === '/skill' && words.length === 2) return ['/skill run'];
@@ -934,6 +937,69 @@ export async function dispatch(rt: Runtime, input: string, session: ShellSession
         return true;
       }
       console.log('usage: /mcp [list|tools|servers|check <server>:<tool>]');
+      return true;
+    }
+    case '/lsp': {
+      // LSP read-only surface (M39). Inspectable without spawning a real
+      // LSP client — each subcommand calls the runtime-bound handlers and
+      // prints the same shape an editor would receive over JSON-RPC.
+      const { archonLspHandlers } = await import('./services/lsp/archon-handlers');
+      const handlers = archonLspHandlers(rt);
+      const [sub, ...more] = rest;
+      const known = ['blastRadius', 'explain', 'violations'] as const;
+      if (!sub || sub === 'list') {
+        console.log(bold(`archon-lsp methods (${known.length})`));
+        console.log(`  ${cyan('archon/blastRadius')}  ${dim('downstream impact of a file/symbol')}`);
+        console.log(`  ${cyan('archon/explain')}      ${dim('one-hop neighborhood of a symbol')}`);
+        console.log(`  ${cyan('archon/violations')}   ${dim('architecture diagnostics (LSP severity)')}`);
+        console.log(dim('workspace/executeCommand routes to the same three (archon.* names)'));
+        return true;
+      }
+      if (sub === 'blast') {
+        const path = more[0];
+        if (!path) {
+          console.log('usage: /lsp blast <path>');
+          return true;
+        }
+        try {
+          const out = await handlers.blastRadius({ path });
+          console.log(`${cyan(path)} → ${out.files.length} file(s) · ${out.symbols.length} downstream symbol(s)`);
+          for (const f of out.files.slice(0, 30)) console.log(`  ${f}`);
+          if (out.files.length > 30) console.log(dim(`  …${out.files.length - 30} more`));
+        } catch (e) {
+          console.log(`lsp blast failed: ${msg(e)}`);
+        }
+        return true;
+      }
+      if (sub === 'explain') {
+        const symbol = more.join(' ').trim();
+        if (!symbol) {
+          console.log('usage: /lsp explain <symbol>');
+          return true;
+        }
+        try {
+          const out = await handlers.explain({ symbol });
+          console.log(out.summary);
+          for (const n of out.neighbours.slice(0, 20)) console.log(`  ${dim('·')} ${n}`);
+          if (out.neighbours.length > 20) console.log(dim(`  …${out.neighbours.length - 20} more`));
+        } catch (e) {
+          console.log(`lsp explain failed: ${msg(e)}`);
+        }
+        return true;
+      }
+      if (sub === 'violations') {
+        const path = more[0];
+        const out = await handlers.violations(path ? { path } : {});
+        if (out.length === 0) {
+          console.log(dim(path ? `no findings under ${path}` : 'no findings'));
+          return true;
+        }
+        const SEV: Record<number, string> = { 1: 'error', 2: 'warn ', 3: 'info ', 4: 'hint ' };
+        console.log(bold(`diagnostics (${out.length})`));
+        for (const d of out) console.log(`  ${dim(SEV[d.severity] ?? '?')}  ${d.message}`);
+        return true;
+      }
+      console.log('usage: /lsp [list|blast <path>|explain <symbol>|violations [path]]');
       return true;
     }
     case '/spec': {
