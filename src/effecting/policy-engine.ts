@@ -45,6 +45,22 @@ export interface PolicyDocument {
   defaults?: { decision?: PolicyDecision };
   profiles: Record<string, PolicyProfile>;
   limits?: PolicyLimits;
+  /**
+   * v2 capability namespaces (M30/M31/M33/M38, ADR-0015). Bespoke strings —
+   * not part of the CapabilityAction enum — that MCP/LSP/workflow/replay surfaces
+   * route through `PolicyEngine.evaluateV2(capability)`. Default is deny for
+   * any namespace not explicitly listed here, and deny for any capability in a
+   * listed namespace that doesn't match an entry (exact, `prefix:*`, or `*`).
+   *
+   * Example:
+   *   v2_capabilities:
+   *     mcp:
+   *       - filesystem:read_file
+   *       - github:list_commits
+   *     workflow:
+   *       - "*"   # any workflow step is allowed in this profile
+   */
+  v2_capabilities?: Record<string, string[]>;
 }
 
 /** Conditions the evaluator needs that aren't part of the request itself. */
@@ -175,6 +191,35 @@ export class PolicyEngine {
       }
     }
     return { profile: this.profileName, chain, rules };
+  }
+
+  /**
+   * Evaluate a v2 capability string (M30/M31/M33/M38). The format is
+   * `namespace:value[:value...]` — currently `mcp`, `lsp`, `workflow`, `replay`.
+   * Default-deny: a namespace absent from `v2_capabilities` returns 'deny',
+   * a capability not matching any entry returns 'deny'. Allowlist entries may
+   * be exact (`filesystem:read_file`), prefix-glob (`filesystem:*`), or full
+   * wildcard (`*`). The engine NEVER allows what the policy hasn't explicitly
+   * granted — tighten-only, matching the v0 evaluator's discipline. See ADR-0015.
+   */
+  evaluateV2(capability: string): 'allow' | 'deny' {
+    const colon = capability.indexOf(':');
+    if (colon === -1) return 'deny';
+    const ns = capability.slice(0, colon);
+    const rest = capability.slice(colon + 1);
+    const allowed = this.doc.v2_capabilities?.[ns];
+    if (!allowed || allowed.length === 0) return 'deny';
+    for (const entry of allowed) {
+      if (entry === '*') return 'allow';
+      if (entry === rest) return 'allow';
+      // `prefix:*` matches `prefix:anything` (one segment or many; pure
+      // string-suffix wildcard, not glob — keeps the rule visually clear).
+      if (entry.endsWith(':*') && rest.startsWith(entry.slice(0, -1))) return 'allow';
+      // `prefix*` allows soft prefix match too (e.g. `read*` for any tool whose
+      // name starts with `read`). Tighter than a full wildcard.
+      if (entry.endsWith('*') && rest.startsWith(entry.slice(0, -1))) return 'allow';
+    }
+    return 'deny';
   }
 
   evaluate(req: CapabilityRequest, ctx: PolicyEvalContext = {}): PolicyVerdict {

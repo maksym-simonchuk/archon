@@ -23,7 +23,13 @@ const ACTIONS = new Set<CapabilityAction>(['fs.read', 'fs.write', 'fs.delete', '
 function validateManifest(m: PluginManifest, allowV1 = false): void {
   if (!m.name) throw new Error('[archon] plugin manifest: missing name');
   if (!m.version) throw new Error(`[archon] plugin "${m.name}": missing version`);
-  const known = allowV1 ? KINDS.has(m.kind) || V1_KINDS.has(m.kind as string) : KINDS.has(m.kind);
+  // Manifest.kind is the v0|v1 union — Set.has expects its element type, so we
+  // narrow through `string`. The two sets are disjoint so the validation is
+  // unambiguous: a v0-only call refuses any v1 kind; a v1-permitting call
+  // accepts both. The runtime split is enforced by `register` (v0) vs
+  // `registerV1`, the latter is the only path that flips `allowV1`.
+  const k = m.kind as string;
+  const known = allowV1 ? (KINDS as Set<string>).has(k) || (V1_KINDS as Set<string>).has(k) : (KINDS as Set<string>).has(k);
   if (!known) throw new Error(`[archon] plugin "${m.name}": unknown kind "${m.kind}"`);
   for (const cap of m.capabilities) {
     if (!ACTIONS.has(cap)) throw new Error(`[archon] plugin "${m.name}": unknown capability "${cap}"`);

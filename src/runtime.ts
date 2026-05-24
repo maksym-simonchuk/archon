@@ -126,6 +126,13 @@ export interface Runtime {
   pluginHost(): Promise<PluginHost>;
   /** A PolicyEngine for `profile` (defaults to the config profile) — pure capability previews, no audit. */
   policy(profile?: Profile): PolicyEngine;
+  /**
+   * v2 capability authorizer (M30/M31/M33/M38). MCP/LSP/workflow/replay
+   * surfaces call this to check a bespoke `namespace:value[:value...]` cap
+   * against the active profile's `v2_capabilities`. Default-deny: unknown
+   * namespaces and unlisted caps return 'deny'.
+   */
+  authorizeV2(capability: string): Promise<'allow' | 'deny'>;
   /** Close every resource this runtime opened (memory, journal). */
   close(): void;
 }
@@ -415,6 +422,13 @@ export async function buildRuntime(root: string): Promise<Runtime> {
 
   const policy = (profile: Profile = config.profile): PolicyEngine => new PolicyEngine(policyDoc, profile);
 
+  // v2 authorizer (M30/M31/M33/M38): a single async-shaped adapter so the MCP
+  // client, LSP server, workflow runtime, and replay command all consult the
+  // same `v2_capabilities` block. Pure delegation — no audit log entry, matches
+  // PolicyEngine.describe in being a read-only check.
+  const authorizeV2 = (capability: string): Promise<'allow' | 'deny'> =>
+    Promise.resolve(policy().evaluateV2(capability));
+
   const close = (): void => {
     memoryStore?.close();
     journalStore?.close();
@@ -447,6 +461,7 @@ export async function buildRuntime(root: string): Promise<Runtime> {
     indexer,
     pluginHost,
     policy,
+    authorizeV2,
     close,
   };
 }

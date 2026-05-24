@@ -91,3 +91,53 @@ describe('PolicyEngine — profile inheritance + hard limits (M3)', () => {
     ).toBe('deny');
   });
 });
+
+describe('PolicyEngine — v2 capabilities (M40/ADR-0015)', () => {
+  it('default-denies any namespace not in v2_capabilities', () => {
+    // An unknown namespace must NEVER allow — tighten-only.
+    expect(safe.evaluateV2('bogus:anything')).toBe('deny');
+    expect(safe.evaluateV2('no-colon')).toBe('deny');
+    expect(safe.evaluateV2('')).toBe('deny');
+  });
+
+  it('default-denies a known namespace whose allowlist is empty', () => {
+    // `mcp: []` in policy.yaml — no MCP tool is callable.
+    expect(safe.evaluateV2('mcp:filesystem:read_file')).toBe('deny');
+    // `workflow: []` — no third-party workflow step can run.
+    expect(safe.evaluateV2('workflow:any-step')).toBe('deny');
+  });
+
+  it('allows entries explicitly listed (LSP read-only methods)', () => {
+    expect(safe.evaluateV2('lsp:archon/blastRadius')).toBe('allow');
+    expect(safe.evaluateV2('lsp:archon/explain')).toBe('allow');
+    expect(safe.evaluateV2('lsp:archon/violations')).toBe('allow');
+    // A method not in the allowlist (even within an allowed namespace) is denied.
+    expect(safe.evaluateV2('lsp:textDocument/didChange')).toBe('deny');
+  });
+
+  it('honours wildcard "*" inside a namespace (replay is read-only)', () => {
+    expect(safe.evaluateV2('replay:run_anything')).toBe('allow');
+    expect(safe.evaluateV2('replay:run_12345')).toBe('allow');
+  });
+
+  it('honours prefix:* and prefix* wildcards inside an allowlist', () => {
+    const doc2 = loadPolicy(
+      [
+        'version: 0',
+        'active_profile: safe',
+        'profiles:',
+        '  safe: { allow: [], ask: [], deny: [] }',
+        'v2_capabilities:',
+        '  mcp:',
+        '    - filesystem:*',
+        '    - github:list*',
+      ].join('\n'),
+    );
+    const eng = new PolicyEngine(doc2, 'safe');
+    expect(eng.evaluateV2('mcp:filesystem:read_file')).toBe('allow');
+    expect(eng.evaluateV2('mcp:filesystem:write_file')).toBe('allow'); // prefix:* matches
+    expect(eng.evaluateV2('mcp:github:list_commits')).toBe('allow'); // prefix* matches
+    expect(eng.evaluateV2('mcp:github:delete_repo')).toBe('deny'); // not listed
+    expect(eng.evaluateV2('mcp:other:tool')).toBe('deny'); // server not listed
+  });
+});
