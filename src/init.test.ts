@@ -23,7 +23,11 @@ describe('cmdInit (archon init)', () => {
 
     expect(existsSync(join(dir, '.archon/policy.yaml'))).toBe(true);
     expect(existsSync(join(dir, '.archon/README.md'))).toBe(true);
+    expect(existsSync(join(dir, '.archon/mcp.yaml.example'))).toBe(true);
     expect(existsSync(join(dir, 'archon.config.json'))).toBe(true);
+    // mcp.yaml.example documents the outbound-MCP shape but the actual
+    // mcp.yaml stays absent — fresh repos default to the empty registry.
+    expect(existsSync(join(dir, '.archon/mcp.yaml'))).toBe(false);
 
     const cfg = JSON.parse(await readFile(join(dir, 'archon.config.json'), 'utf8'));
     expect(cfg).toMatchObject({ profile: 'safe', providers: [] });

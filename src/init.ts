@@ -63,16 +63,42 @@ limits:
   context_tokens_max: 60000
 `;
 
+// Commented sample mcp.yaml — written as `.archon/mcp.yaml.example` so the
+// outbound MCP config layer is discoverable without enabling anything by
+// default. Loader treats a missing file as `{ servers: [] }`; the example
+// stays inert until the user copies + uncomments it AND grants `mcp:*` in
+// policy.yaml. *Configured ≠ authorized* — that's the M30/ADR-0015 invariant.
+const MCP_YAML_EXAMPLE = `# .archon/mcp.yaml — outbound MCP server registry (optional).
+#
+# Each entry lists a child-process MCP server Archon can call out to. The
+# policy at .archon/policy.yaml still gates every call by
+# \`mcp:<server>:<tool>\` (default-deny per ADR-0015 #4); a server here is
+# *configured*, not yet *authorized*. To enable: copy this file to
+# mcp.yaml, uncomment the entries you want, and grant the matching
+# capability under \`v2_capabilities.mcp\` in policy.yaml.
+#
+# servers:
+#   - id: claude-code
+#     command: claude-mcp
+#     args: [--stdio]
+#     env:
+#       FOO: bar
+#   - id: cursor
+#     command: cursor-mcp
+`;
+
 const ARCHON_README = `# .archon/
 
 Runtime state + policy for the Archon runtime.
 
 | Path          | Tracked? | Purpose                                                    |
 | ------------- | -------- | ---------------------------------------------------------- |
-| \`policy.yaml\` | ✅ yes   | Machine-enforced safety policy (mirrors \`AGENTS.md\`).      |
-| \`journal.db\`  | ❌ no    | Append-only task journal (resume + audit).                 |
-| \`memory.db\`   | ❌ no    | Episodic / semantic / procedural memory store.             |
-| \`index.db\`    | ❌ no    | Incremental symbol/file index.                             |
+| \`policy.yaml\`         | ✅ yes   | Machine-enforced safety policy (mirrors \`AGENTS.md\`).      |
+| \`mcp.yaml.example\`    | ✅ yes   | Sample outbound MCP config — copy to \`mcp.yaml\` to enable. |
+| \`mcp.yaml\`            | ❌ no    | Outbound MCP server registry (optional, gitignored).        |
+| \`journal.db\`          | ❌ no    | Append-only task journal (resume + audit).                 |
+| \`memory.db\`           | ❌ no    | Episodic / semantic / procedural memory store.             |
+| \`index.db\`            | ❌ no    | Incremental symbol/file index.                             |
 
 Only \`policy.yaml\` and this README are committed; runtime state is gitignored.
 `;
@@ -109,11 +135,15 @@ export async function cmdInit(root: string): Promise<void> {
     await mkdir(join(root, '.archon'), { recursive: true });
     await writeFile(policyPath, POLICY_YAML);
     await writeFile(join(root, '.archon', 'README.md'), ARCHON_README);
+    // mcp.yaml.example documents the outbound-MCP config layer; the actual
+    // mcp.yaml stays absent so a fresh repo defaults to the empty server
+    // registry (the policy already default-denies every mcp:* cap).
+    await writeFile(join(root, '.archon', 'mcp.yaml.example'), MCP_YAML_EXAMPLE);
 
     const configPath = join(root, 'archon.config.json');
     if (!existsSync(configPath)) await writeFile(configPath, CONFIG_JSON);
 
-    console.log('archon: initialized .archon/policy.yaml + .archon/README.md + archon.config.json');
+    console.log('archon: initialized .archon/{policy.yaml, README.md, mcp.yaml.example} + archon.config.json');
   } else {
     console.log('archon: already initialized (.archon/policy.yaml exists) — leaving it untouched');
   }
