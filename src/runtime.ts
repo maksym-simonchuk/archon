@@ -33,6 +33,7 @@ import { parseTsSymbols } from './sensing/ts-parser';
 import { SymbolGraph } from './sensing/symbol-graph';
 import { loadConfig, type ArchonConfig } from './services/config';
 import { createEventBus, type EventBus } from './services/event-bus';
+import { OtelExporter, exporterFromEnv } from './services/otel';
 import { createAiClient } from './services/providers/ai-sdk';
 import { resolveModels } from './services/model-catalog';
 import { PluginHost } from './services/plugin-host';
@@ -146,6 +147,15 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   // option (router, MCP server, plugin host) can be wired with the same wire.
   // Bounded ring + drop-oldest semantics live inside InMemoryEventBus.
   const bus = createEventBus();
+
+  // Optional OTel exporter (M37). Off by default — only activates if
+  // `OTEL_EXPORTER_OTLP_ENDPOINT` is present in the environment. Telemetry is
+  // failure-silent (a 500 from the collector drops a batch, never throws),
+  // and the exporter only observes the bus — zero authority, zero gating.
+  // Closed on `rt.close()` so a final flush completes before process exit.
+  const otelOpts = exporterFromEnv(process.env);
+  const otel = otelOpts ? new OtelExporter(otelOpts) : undefined;
+  otel?.attach(bus);
 
   const models = resolveModels(config.providers);
   const clients = buildClients(config.providers);
@@ -399,8 +409,11 @@ export async function buildRuntime(root: string): Promise<Runtime> {
   const close = (): void => {
     memoryStore?.close();
     journalStore?.close();
-    // Closes every live subscriber's iterator cleanly. Pending publications
-    // never throw, so a producer racing close just drops on the floor.
+    // Best-effort final flush of any buffered spans. The exporter swallows
+    // network errors itself (telemetry must never break the engine).
+    if (otel) void otel.stop();
+    // Closes every live subscriber's iterator cleanly (including OTel's).
+    // Pending publications never throw, so a producer racing close just drops.
     bus.close();
   };
 
